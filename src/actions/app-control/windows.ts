@@ -1,54 +1,46 @@
 import type { AppController, WindowInfo, UIElement } from './interface.ts';
+import { DesktopController } from './desktop-controller.ts';
 
+/**
+ * Windows App Controller — delegates to DesktopController sidecar.
+ * Used when running natively on Windows (not WSL).
+ */
 export class WindowsAppController implements AppController {
-  private notImplemented(method: string): never {
-    throw new Error(
-      `${method} not yet implemented for Windows.\n\n` +
-      `TODO: Implement using one of:\n` +
-      `  - Windows UI Automation COM API via N-API native bindings\n` +
-      `  - PowerShell UIAutomation module\n` +
-      `  - win32-api Node.js package\n` +
-      `  - AutoHotkey IPC bridge\n\n` +
-      `Reference:\n` +
-      `  - https://docs.microsoft.com/en-us/windows/win32/winauto/entry-uiauto-win32\n` +
-      `  - https://github.com/microsoft/PowerShell/tree/master/src/System.Management.Automation\n` +
-      `  - https://www.nuget.org/packages/UIAutomationClient/`
-    );
-  }
+  private controller = new DesktopController();
 
   async getActiveWindow(): Promise<WindowInfo> {
-    this.notImplemented('getActiveWindow');
+    return this.controller.getActiveWindow();
   }
 
   async getWindowTree(pid: number): Promise<UIElement[]> {
-    this.notImplemented('getWindowTree');
+    return this.controller.getWindowTree(pid);
   }
 
   async listWindows(): Promise<WindowInfo[]> {
-    this.notImplemented('listWindows');
+    return this.controller.listWindows();
   }
 
   async clickElement(element: UIElement): Promise<void> {
-    this.notImplemented('clickElement');
+    return this.controller.clickElement(element);
   }
 
   async typeText(text: string): Promise<void> {
-    this.notImplemented('typeText');
+    return this.controller.typeText(text);
   }
 
   async pressKeys(keys: string[]): Promise<void> {
-    this.notImplemented('pressKeys');
+    return this.controller.pressKeys(keys);
   }
 
   async captureScreen(): Promise<Buffer> {
-    this.notImplemented('captureScreen');
+    return this.controller.captureScreen();
   }
 
   async captureWindow(pid: number): Promise<Buffer> {
-    this.notImplemented('captureWindow');
+    return this.controller.captureWindow(pid);
   }
 
   async focusWindow(pid: number): Promise<void> {
-    this.notImplemented('focusWindow');
+    return this.controller.focusWindow(pid);
   }
 }

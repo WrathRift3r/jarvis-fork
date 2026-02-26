@@ -3,7 +3,8 @@ import { AnthropicProvider } from './anthropic.ts';
 import { OpenAIProvider } from './openai.ts';
 import { OllamaProvider } from './ollama.ts';
 import { LLMManager } from './manager.ts';
-import type { LLMMessage } from './provider.ts';
+import { guardImageSize, type LLMMessage, type ContentBlock } from './provider.ts';
+import { isToolResult, type ToolResult } from '../actions/tools/registry.ts';
 
 describe('LLM Provider Types', () => {
   test('AnthropicProvider can be instantiated', () => {
@@ -153,5 +154,78 @@ describe('Default Models', () => {
     expect(anthropic.defaultModel).toBe('custom-model');
     expect(openai.defaultModel).toBe('custom-model');
     expect(ollama.defaultModel).toBe('custom-model');
+  });
+});
+
+describe('Vision Support', () => {
+  describe('guardImageSize', () => {
+    test('passes text blocks through unchanged', () => {
+      const block: ContentBlock = { type: 'text', text: 'hello' };
+      expect(guardImageSize(block)).toBe(block);
+    });
+
+    test('passes small images through unchanged', () => {
+      const block: ContentBlock = {
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/png', data: 'abc123' },
+      };
+      expect(guardImageSize(block)).toBe(block);
+    });
+
+    test('replaces oversized images with text warning', () => {
+      const bigData = 'x'.repeat(6 * 1024 * 1024); // 6 MB
+      const block: ContentBlock = {
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/png', data: bigData },
+      };
+      const result = guardImageSize(block);
+      expect(result.type).toBe('text');
+      expect((result as { type: 'text'; text: string }).text).toContain('too large');
+    });
+  });
+
+  describe('isToolResult', () => {
+    test('returns true for valid ToolResult', () => {
+      const tr: ToolResult = {
+        content: [{ type: 'text', text: 'hello' }],
+      };
+      expect(isToolResult(tr)).toBe(true);
+    });
+
+    test('returns false for plain string', () => {
+      expect(isToolResult('hello')).toBe(false);
+    });
+
+    test('returns false for null', () => {
+      expect(isToolResult(null)).toBe(false);
+    });
+
+    test('returns false for object without content array', () => {
+      expect(isToolResult({ content: 'not an array' })).toBe(false);
+    });
+
+    test('returns false for object with no content field', () => {
+      expect(isToolResult({ data: 'something' })).toBe(false);
+    });
+  });
+
+  describe('ContentBlock in LLMMessage', () => {
+    test('LLMMessage accepts string content', () => {
+      const msg: LLMMessage = { role: 'user', content: 'Hello' };
+      expect(typeof msg.content).toBe('string');
+    });
+
+    test('LLMMessage accepts ContentBlock[] content', () => {
+      const msg: LLMMessage = {
+        role: 'tool',
+        content: [
+          { type: 'text', text: 'Screenshot captured' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abc' } },
+        ],
+        tool_call_id: 'test-id',
+      };
+      expect(Array.isArray(msg.content)).toBe(true);
+      expect((msg.content as ContentBlock[]).length).toBe(2);
+    });
   });
 });

@@ -16,11 +16,20 @@ import { loadConfig } from "../config/loader.ts";
 import { AgentService } from "./agent-service.ts";
 import { ObserverService } from "./observer-service.ts";
 import { WebSocketService } from "./ws-service.ts";
+import { EventReactor } from "./event-reactor.ts";
+import { EventCoalescer } from "./event-coalescer.ts";
+import { CommitmentExecutor } from "./commitment-executor.ts";
+import { checkCommitments } from "./event-classifier.ts";
+import { createApiRoutes } from "./api-routes.ts";
+import { GoogleAuth } from "../integrations/google-auth.ts";
+import { ResearchQueue } from "./research-queue.ts";
+import { researchQueueTool, setResearchQueueRef } from "../actions/tools/research.ts";
+import { ChannelService } from "./channel-service.ts";
+import { BackgroundAgentService } from "./background-agent-service.ts";
 
 // Constants
 const DEFAULT_PORT = 3142;  // JARVIS port
 const DEFAULT_DATA_DIR = path.join(os.homedir(), '.jarvis');
-const HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
 export interface DaemonConfig {
   port: number;
@@ -33,6 +42,8 @@ let shutdownInProgress = false;
 let registry: ServiceRegistry | null = null;
 let healthMonitor: HealthMonitor | null = null;
 let heartbeatTimer: Timer | null = null;
+let commitmentExecutor: CommitmentExecutor | null = null;
+let bgAgent: BackgroundAgentService | null = null;
 
 /**
  * Parse command line arguments
@@ -118,6 +129,24 @@ async function handleShutdown(signal: string): Promise<void> {
       heartbeatTimer = null;
     }
 
+    // Stop commitment executor
+    if (commitmentExecutor) {
+      commitmentExecutor.stop();
+      commitmentExecutor = null;
+    }
+
+    // Stop background agent (separate browser)
+    if (bgAgent) {
+      await bgAgent.stop();
+      bgAgent = null;
+    }
+
+    // Stop desktop sidecar if connected
+    try {
+      const { desktop } = await import('../actions/tools/desktop.ts');
+      if (desktop.connected) await desktop.disconnect();
+    } catch { /* ignore */ }
+
     // Stop health monitor
     if (healthMonitor) {
       healthMonitor.stop();
@@ -202,28 +231,160 @@ export async function startDaemon(userConfig?: Partial<DaemonConfig>): Promise<v
     // 3. Create service registry
     registry = new ServiceRegistry();
 
-    // 4. Create real services
+    // 4. Create proactive modules
+    const heartbeatConfig = jarvisConfig.heartbeat;
+    const reactor = new EventReactor();
+    const coalescer = new EventCoalescer();
+
+    // 4b. Create GoogleAuth if configured
+    let googleAuth: GoogleAuth | null = null;
+    if (jarvisConfig.google?.client_id && jarvisConfig.google?.client_secret) {
+      googleAuth = new GoogleAuth(jarvisConfig.google.client_id, jarvisConfig.google.client_secret);
+      if (googleAuth.isAuthenticated()) {
+        console.log('[Daemon] Google OAuth: authenticated (Gmail + Calendar observers enabled)');
+      } else {
+        console.log('[Daemon] Google OAuth: credentials found but not authenticated');
+        console.log('[Daemon] Run: bun run src/scripts/google-setup.ts to authorize');
+      }
+    }
+
+    // 4c. Create research queue
+    const researchQueue = new ResearchQueue();
+    setResearchQueueRef(researchQueue);
+
+    // 5. Create real services
     const agentService = new AgentService(jarvisConfig);
-    const observerService = new ObserverService();
+    agentService.setResearchQueue(researchQueue);
+    const observerService = new ObserverService(reactor, coalescer, googleAuth ?? undefined);
     const wsService = new WebSocketService(config.port, agentService);
 
-    // 5. Register services in startup order
-    //    Agent first (needs DB), Observers second (needs DB), WebSocket last (needs Agent)
+    // 5b. Create channel service for external comms (Telegram, Discord)
+    const channelService = new ChannelService(jarvisConfig, agentService);
+
+    // 5c. Create commitment executor (notify-then-execute)
+    const aggressiveness = heartbeatConfig?.aggressiveness ?? 'moderate';
+    const executor = new CommitmentExecutor(aggressiveness as any);
+
+    // 6. Wire reactor callback for WebSocket notifications
+    reactor.setReactionCallback((text, priority) => {
+      wsService.broadcastNotification(text, priority);
+    });
+    // Note: reactor.setAgentService + executor.setAgentService wired to bgAgent after startAll (step 10c)
+
+    // 6b. Wire delegation progress to WebSocket for sub-agent visibility
+    agentService.setDelegationProgressCallback((event) => {
+      wsService.broadcastSubAgentProgress(event);
+    });
+
+    // 7. Register services in startup order
+    //    Agent first (needs DB), Observers second, Channels third, WebSocket last (needs Agent)
     registry.register(agentService);
     registry.register(observerService);
+    registry.register(channelService);
     registry.register(wsService);
 
-    // 6. Start all services
+    // 8. Start health monitor (before services, so API routes can reference it)
+    healthMonitor = new HealthMonitor(registry, config.dbPath);
+
+    // 8b. Wire channel service to WebSocket for cross-channel broadcasts
+    wsService.setChannelService(channelService);
+
+    // 8c. Wire TTS provider if configured
+    if (jarvisConfig.tts?.enabled) {
+      const { createTTSProvider } = await import('../comms/voice.ts');
+      const ttsProvider = createTTSProvider(jarvisConfig.tts);
+      if (ttsProvider) {
+        wsService.setTTSProvider(ttsProvider);
+        console.log(`[Daemon] TTS enabled: ${jarvisConfig.tts.voice ?? 'en-US-AriaNeural'}`);
+      }
+    }
+
+    // 8d. Wire STT provider for voice input via dashboard
+    if (jarvisConfig.stt) {
+      const { createSTTProvider } = await import('../comms/voice.ts');
+      const sttProvider = createSTTProvider(jarvisConfig.stt);
+      if (sttProvider) {
+        wsService.setSTTProvider(sttProvider);
+        console.log(`[Daemon] STT for voice input: ${jarvisConfig.stt.provider}`);
+      }
+    }
+
+    // 9. Set up API routes + dashboard static files
+    const apiRoutes = createApiRoutes({
+      healthMonitor,
+      agentService,
+      config: jarvisConfig,
+      wsService,
+      channelService,
+    });
+    wsService.setApiRoutes(apiRoutes);
+
+    // Serve pre-built dashboard from ui/dist/
+    const uiDistDir = path.join(import.meta.dir, '../../ui/dist');
+    wsService.setStaticDir(uiDistDir);
+
+    // Serve public assets (wake word models, WASM) from ui/public/
+    const uiPublicDir = path.join(import.meta.dir, '../../ui/public');
+    wsService.setPublicDir(uiPublicDir);
+
+    // 10. Start all services
     await registry.startAll();
 
-    // 7. Start health monitor
-    healthMonitor = new HealthMonitor(registry, config.dbPath);
+    // 10b. Create and start background agent (needs LLM providers from agentService.start())
+    const bgAgentService = new BackgroundAgentService(jarvisConfig, agentService.getLLMManager());
+    bgAgentService.setResearchQueue(researchQueue);
+    await bgAgentService.start();
+    bgAgent = bgAgentService;
+    console.log('[Daemon] Background agent started (separate browser for heartbeat/reactions)');
+
+    // 10c. Wire reactor + executor to background agent (separate browser, no chat contention)
+    reactor.setAgentService(bgAgentService);
+    executor.setAgentService(bgAgentService);
+
+    // 10d. Wire executor broadcast (needs wsServer running) and start
+    executor.setBroadcast((msg) => wsService.getServer().broadcast(msg));
+    wsService.setCommitmentExecutor(executor);
+    executor.start();
+    commitmentExecutor = executor;
+
+    // 11. Start health monitoring
     healthMonitor.start(config.healthCheckInterval);
 
-    // 8. Set up heartbeat timer (1 hour interval)
+    // 12. Set up heartbeat timer with configurable interval and active hours
+    const heartbeatIntervalMs = (heartbeatConfig?.interval_minutes ?? 15) * 60 * 1000;
+    const activeHours = heartbeatConfig?.active_hours ?? { start: 8, end: 23 };
+
+    console.log(`[Daemon] Heartbeat interval: ${heartbeatConfig?.interval_minutes ?? 15} min, active hours: ${activeHours.start}:00-${activeHours.end}:00`);
+
     heartbeatTimer = setInterval(async () => {
+      // Check if within active hours
+      const currentHour = new Date().getHours();
+      if (currentHour < activeHours.start || currentHour >= activeHours.end) {
+        console.log(`[Daemon] Outside active hours (${activeHours.start}-${activeHours.end}), skipping heartbeat`);
+        return;
+      }
+
       try {
-        const heartbeatResponse = await agentService.handleHeartbeat();
+        // Check commitments and route critical/high ones to reactor
+        const commitmentEvents = checkCommitments();
+        for (const evt of commitmentEvents) {
+          if (evt.priority === 'critical' || evt.priority === 'high') {
+            reactor.react(evt).catch(err =>
+              console.error('[Daemon] Commitment reaction error:', err)
+            );
+          } else {
+            coalescer.addEvent(evt);
+          }
+        }
+
+        // Flush coalesced events for heartbeat
+        const coalescedSummary = coalescer.flush();
+
+        // Run heartbeat on BACKGROUND agent (separate browser, doesn't block chat)
+        const heartbeatResponse = await bgAgentService.handleHeartbeat(
+          coalescedSummary || undefined
+        );
+
         if (heartbeatResponse) {
           console.log('[Daemon] Heartbeat response:', heartbeatResponse.slice(0, 100));
           wsService.broadcastHeartbeat(heartbeatResponse);
@@ -231,7 +392,7 @@ export async function startDaemon(userConfig?: Partial<DaemonConfig>): Promise<v
       } catch (err) {
         console.error('[Daemon] Heartbeat error:', err);
       }
-    }, HEARTBEAT_INTERVAL_MS);
+    }, heartbeatIntervalMs);
 
     logWithTimestamp(`JARVIS daemon running on port ${config.port}`);
     console.log('');
@@ -259,6 +420,14 @@ process.on('uncaughtException', (error) => {
 });
 
 process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+
+  // Browser timeouts and CDP errors should NOT crash the daemon
+  if (msg.includes('Timeout waiting for') || msg.includes('CDP')) {
+    console.warn('[Daemon] Non-fatal browser error (ignoring):', msg);
+    return;
+  }
+
   console.error('[Daemon] Unhandled rejection:', reason);
   handleShutdown('unhandledRejection');
 });

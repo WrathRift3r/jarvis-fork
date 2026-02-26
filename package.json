@@ -7,13 +7,25 @@
   "scripts": {
     "start": "bun run src/daemon/index.ts",
     "dev": "bun --hot run src/daemon/index.ts",
+    "copy:models": "mkdir -p ui/public/openwakeword/models ui/public/ort && cp node_modules/openwakeword-wasm-browser/models/melspectrogram.onnx node_modules/openwakeword-wasm-browser/models/embedding_model.onnx node_modules/openwakeword-wasm-browser/models/silero_vad.onnx node_modules/openwakeword-wasm-browser/models/hey_jarvis_v0.1.onnx ui/public/openwakeword/models/ && cp node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.mjs node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs ui/public/ort/",
+    "prebuild:ui": "bun run copy:models",
+    "build:ui": "bun build ui/index.html --outdir ui/dist",
     "test": "bun test",
     "db:init": "bun run src/vault/schema.ts",
     "setup": "bun run scripts/setup-config.ts",
     "test:llm": "bun run src/llm/test.ts",
-    "examples": "bun run examples/llm-integration.ts"
+    "examples": "bun run examples/llm-integration.ts",
+    "setup:google": "bun run src/scripts/google-setup.ts"
   },
   "dependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "discord.js": "^14.25.1",
+    "edge-tts-universal": "^1.4.0",
+    "openwakeword-wasm-browser": "^0.1.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwindcss": "^4.2.1",
     "yaml": "^2.7.0"
   },
   "devDependencies": {

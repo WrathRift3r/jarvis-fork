@@ -1,17 +1,24 @@
 import type { Server, ServerWebSocket } from 'bun';
+import path from 'node:path';
 
 export type WSMessage = {
-  type: 'chat' | 'command' | 'status' | 'stream' | 'error';
+  type: 'chat' | 'command' | 'status' | 'stream' | 'error' | 'notification'
+      | 'tts_start' | 'tts_end' | 'voice_start' | 'voice_end';
   payload: unknown;
   id?: string;
+  priority?: 'urgent' | 'normal' | 'low';
   timestamp: number;
 };
 
 export type WSClientHandler = {
-  onMessage: (msg: WSMessage) => Promise<WSMessage | void>;
-  onConnect: () => void;
-  onDisconnect: () => void;
+  onMessage: (msg: WSMessage, ws: ServerWebSocket<unknown>) => Promise<WSMessage | void>;
+  onBinaryMessage?: (data: Buffer, ws: ServerWebSocket<unknown>) => Promise<void>;
+  onConnect: (ws: ServerWebSocket<unknown>) => void;
+  onDisconnect: (ws: ServerWebSocket<unknown>) => void;
 };
+
+type RouteHandler = (req: Request) => Response | Promise<Response>;
+type MethodRoutes = { [method: string]: RouteHandler };
 
 export class WebSocketServer {
   private server: Server | null = null;
@@ -19,6 +26,9 @@ export class WebSocketServer {
   private handler: WSClientHandler | null = null;
   private port: number;
   private startTime: number = 0;
+  private apiRoutes: Map<string, MethodRoutes> = new Map();
+  private staticDir: string | null = null;
+  private publicDir: string | null = null;
 
   constructor(port: number = 3142) {
     this.port = port;
@@ -26,6 +36,31 @@ export class WebSocketServer {
 
   setHandler(handler: WSClientHandler): void {
     this.handler = handler;
+  }
+
+  /**
+   * Register API route handlers (method-based).
+   * Example: setApiRoutes({ '/api/health': { GET: handler } })
+   */
+  setApiRoutes(routes: Record<string, MethodRoutes>): void {
+    for (const [path, methods] of Object.entries(routes)) {
+      this.apiRoutes.set(path, methods);
+    }
+  }
+
+  /**
+   * Set directory for serving static files (pre-built dashboard).
+   */
+  setStaticDir(dir: string): void {
+    this.staticDir = dir;
+  }
+
+  /**
+   * Set directory for serving public assets (models, WASM, etc.).
+   * Falls through to this if file not found in staticDir.
+   */
+  setPublicDir(dir: string): void {
+    this.publicDir = dir;
   }
 
   start(): void {
@@ -39,18 +74,20 @@ export class WebSocketServer {
 
     this.server = Bun.serve({
       port: this.port,
-      fetch(req, server) {
-        const url = new URL(req.url);
 
-        if (url.pathname === '/ws') {
+      async fetch(req, server) {
+        const url = new URL(req.url);
+        const pathname = url.pathname;
+
+        // 1. WebSocket upgrade
+        if (pathname === '/ws') {
           const success = server.upgrade(req);
-          if (success) {
-            return undefined;
-          }
+          if (success) return undefined;
           return new Response('WebSocket upgrade failed', { status: 500 });
         }
 
-        if (url.pathname === '/health') {
+        // 2. Health check
+        if (pathname === '/health') {
           return Response.json({
             status: 'ok',
             uptime: Date.now() - self.startTime,
@@ -59,32 +96,101 @@ export class WebSocketServer {
           });
         }
 
-        // Default root response
-        return Response.json({
-          name: 'J.A.R.V.I.S.',
-          version: '0.1.0',
-          endpoints: {
-            websocket: '/ws',
-            health: '/health',
-          },
-          clients: self.clients.size,
-        });
+        // 3. API routes
+        if (pathname.startsWith('/api/')) {
+          // Handle CORS preflight
+          if (req.method === 'OPTIONS') {
+            return new Response(null, {
+              status: 204,
+              headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type',
+              },
+            });
+          }
+
+          // Try exact match first
+          const exactRoute = self.apiRoutes.get(pathname);
+          if (exactRoute) {
+            const handler = exactRoute[req.method];
+            if (handler) return handler(req);
+            return new Response('Method Not Allowed', { status: 405 });
+          }
+
+          // Try parameterized routes (e.g., /api/vault/entities/:id)
+          for (const [pattern, methods] of self.apiRoutes) {
+            const params = matchRoute(pattern, pathname);
+            if (params) {
+              const handler = methods[req.method];
+              if (handler) {
+                // Attach params to request
+                (req as any).params = params;
+                return handler(req);
+              }
+              return new Response('Method Not Allowed', { status: 405 });
+            }
+          }
+
+          return Response.json({ error: 'Not found' }, { status: 404 });
+        }
+
+        // 4. Static files (dashboard)
+        if (self.staticDir) {
+          let filePath: string;
+
+          if (pathname === '/' || pathname === '/index.html') {
+            filePath = path.join(self.staticDir, 'index.html');
+          } else {
+            // Serve JS/CSS/assets
+            filePath = path.join(self.staticDir, pathname);
+          }
+
+          const file = Bun.file(filePath);
+          if (await file.exists()) {
+            return new Response(file);
+          }
+        }
+
+        // 5. Public assets fallback (models, WASM, etc.)
+        if (self.publicDir) {
+          const publicPath = path.join(self.publicDir, pathname);
+          const publicFile = Bun.file(publicPath);
+          if (await publicFile.exists()) {
+            return new Response(publicFile);
+          }
+        }
+
+        return new Response('Not Found', { status: 404 });
       },
 
       websocket: {
         open(ws) {
           self.clients.add(ws);
           console.log('[WebSocketServer] Client connected. Total clients:', self.clients.size);
-          self.handler?.onConnect();
+          self.handler?.onConnect(ws);
         },
 
         async message(ws, message) {
+          // Binary frame = audio data (mic audio from client)
+          if (message instanceof Buffer) {
+            if (self.handler?.onBinaryMessage) {
+              try {
+                await self.handler.onBinaryMessage(message, ws);
+              } catch (error) {
+                console.error('[WebSocketServer] Error processing binary message:', error);
+              }
+            }
+            return;
+          }
+
+          // Text frame = JSON message (existing protocol)
           try {
             const msg: WSMessage = JSON.parse(message.toString());
             console.log('[WebSocketServer] Received:', msg.type, msg.id);
 
             if (self.handler) {
-              const response = await self.handler.onMessage(msg);
+              const response = await self.handler.onMessage(msg, ws);
               if (response) {
                 ws.send(JSON.stringify(response));
               }
@@ -105,13 +211,16 @@ export class WebSocketServer {
         close(ws) {
           self.clients.delete(ws);
           console.log('[WebSocketServer] Client disconnected. Total clients:', self.clients.size);
-          self.handler?.onDisconnect();
+          self.handler?.onDisconnect(ws);
         },
       },
     });
 
     console.log(`[WebSocketServer] Started on ws://localhost:${this.port}/ws`);
     console.log(`[WebSocketServer] Health endpoint: http://localhost:${this.port}/health`);
+    if (this.staticDir) {
+      console.log(`[WebSocketServer] Dashboard: http://localhost:${this.port}/`);
+    }
   }
 
   stop(): void {
@@ -147,6 +256,28 @@ export class WebSocketServer {
     }
   }
 
+  /**
+   * Unicast a JSON message to a specific client (e.g. tts_start/tts_end signals).
+   */
+  sendToClient(ws: ServerWebSocket<unknown>, message: WSMessage): void {
+    try {
+      ws.send(JSON.stringify(message));
+    } catch (error) {
+      console.error('[WebSocketServer] Error unicasting to client:', error);
+    }
+  }
+
+  /**
+   * Unicast binary data to a specific client (e.g. TTS audio chunks).
+   */
+  sendBinary(ws: ServerWebSocket<unknown>, data: Buffer): void {
+    try {
+      ws.sendBinary(data);
+    } catch (error) {
+      console.error('[WebSocketServer] Error sending binary to client:', error);
+    }
+  }
+
   isRunning(): boolean {
     return this.server !== null;
   }
@@ -158,4 +289,30 @@ export class WebSocketServer {
   getClientCount(): number {
     return this.clients.size;
   }
+}
+
+/**
+ * Match a route pattern like '/api/vault/entities/:id/facts' against a pathname.
+ * Returns params object if matched, null otherwise.
+ */
+function matchRoute(pattern: string, pathname: string): Record<string, string> | null {
+  // Skip wildcard patterns
+  if (pattern.includes('*')) return null;
+
+  const patternParts = pattern.split('/');
+  const pathParts = pathname.split('/');
+
+  if (patternParts.length !== pathParts.length) return null;
+
+  const params: Record<string, string> = {};
+
+  for (let i = 0; i < patternParts.length; i++) {
+    if (patternParts[i].startsWith(':')) {
+      params[patternParts[i].slice(1)] = pathParts[i];
+    } else if (patternParts[i] !== pathParts[i]) {
+      return null;
+    }
+  }
+
+  return Object.keys(params).length > 0 ? params : null;
 }

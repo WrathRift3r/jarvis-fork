@@ -42,16 +42,11 @@ test('WebSocketServer - health endpoint', async () => {
   server.stop();
 });
 
-test('WebSocketServer - root endpoint', async () => {
+test('WebSocketServer - root endpoint returns 404 without static dir', async () => {
   server.start();
 
   const response = await fetch('http://localhost:3143/');
-  expect(response.ok).toBe(true);
-
-  const data = await response.json();
-  expect(data.name).toBe('J.A.R.V.I.S.');
-  expect(data.version).toBe('0.1.0');
-  expect(data.endpoints).toBeDefined();
+  expect(response.status).toBe(404);
 
   server.stop();
 });
@@ -61,17 +56,17 @@ test('WebSocketServer - WebSocket connection', async () => {
   let disconnectCalled = false;
 
   server.setHandler({
-    async onMessage(msg) {
+    async onMessage(msg, _ws) {
       return {
         type: 'status',
         payload: { echo: msg.payload },
         timestamp: Date.now(),
       };
     },
-    onConnect() {
+    onConnect(_ws) {
       connectCalled = true;
     },
-    onDisconnect() {
+    onDisconnect(_ws) {
       disconnectCalled = true;
     },
   });
@@ -157,5 +152,126 @@ test('WebSocketServer - broadcast', async () => {
   expect(messages[1][0].payload).toEqual({ text: 'Broadcast to all' });
 
   clients.forEach((ws) => ws.close());
+  server.stop();
+});
+
+test('WebSocketServer - binary message routing', async () => {
+  let receivedBinary: Buffer | null = null;
+  let receivedFromWs: any = null;
+
+  server.setHandler({
+    async onMessage(msg, _ws) { return undefined; },
+    async onBinaryMessage(data, ws) {
+      receivedBinary = data;
+      receivedFromWs = ws;
+    },
+    onConnect(_ws) {},
+    onDisconnect(_ws) {},
+  });
+
+  server.start();
+
+  const ws = new WebSocket('ws://localhost:3143/ws');
+  await new Promise<void>((resolve) => { ws.onopen = () => resolve(); });
+
+  // Send binary data
+  const testData = new Uint8Array([1, 2, 3, 4, 5]);
+  ws.send(testData.buffer);
+
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  expect(receivedBinary).not.toBeNull();
+  expect(receivedBinary!.length).toBe(5);
+  expect(receivedFromWs).not.toBeNull();
+
+  ws.close();
+  server.stop();
+});
+
+test('WebSocketServer - sendBinary reaches client', async () => {
+  let serverWsRef: any = null;
+
+  server.setHandler({
+    async onMessage(msg, ws) {
+      serverWsRef = ws;
+      return { type: 'status', payload: { ok: true }, timestamp: Date.now() };
+    },
+    onConnect(_ws) {},
+    onDisconnect(_ws) {},
+  });
+
+  server.start();
+
+  const ws = new WebSocket('ws://localhost:3143/ws');
+  ws.binaryType = 'arraybuffer';
+
+  let receivedBinary: ArrayBuffer | null = null;
+
+  await new Promise<void>((resolve) => { ws.onopen = () => resolve(); });
+
+  ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) {
+      receivedBinary = e.data;
+    }
+  };
+
+  // Send a JSON message first to capture the server ws ref
+  ws.send(JSON.stringify({ type: 'status', payload: {}, timestamp: Date.now() }));
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  expect(serverWsRef).not.toBeNull();
+
+  // Send binary from server to client
+  server.sendBinary(serverWsRef, Buffer.from([10, 20, 30]));
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  expect(receivedBinary).not.toBeNull();
+  expect(new Uint8Array(receivedBinary!)).toEqual(new Uint8Array([10, 20, 30]));
+
+  ws.close();
+  server.stop();
+});
+
+test('WebSocketServer - sendToClient unicasts JSON', async () => {
+  let serverWsRef: any = null;
+
+  server.setHandler({
+    async onMessage(msg, ws) {
+      serverWsRef = ws;
+      return undefined;  // No auto-response
+    },
+    onConnect(_ws) {},
+    onDisconnect(_ws) {},
+  });
+
+  server.start();
+
+  const ws = new WebSocket('ws://localhost:3143/ws');
+  const received: WSMessage[] = [];
+
+  await new Promise<void>((resolve) => { ws.onopen = () => resolve(); });
+
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      received.push(JSON.parse(e.data));
+    }
+  };
+
+  // Trigger to get ws ref
+  ws.send(JSON.stringify({ type: 'command', payload: {}, timestamp: Date.now() }));
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  // Unicast a tts_start message
+  server.sendToClient(serverWsRef, {
+    type: 'tts_start',
+    payload: { requestId: 'test-123' },
+    timestamp: Date.now(),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  expect(received.length).toBe(1);
+  expect(received[0].type).toBe('tts_start');
+  expect((received[0].payload as any).requestId).toBe('test-123');
+
+  ws.close();
   server.stop();
 });

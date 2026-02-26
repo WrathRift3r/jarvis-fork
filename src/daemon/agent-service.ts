@@ -18,7 +18,17 @@ import { OpenAIProvider } from '../llm/openai.ts';
 import { OllamaProvider } from '../llm/ollama.ts';
 import { AgentOrchestrator } from '../agents/orchestrator.ts';
 import { loadRole } from '../roles/loader.ts';
+import { ToolRegistry } from '../actions/tools/registry.ts';
+import { BUILTIN_TOOLS, browser } from '../actions/tools/builtin.ts';
+import { createDelegateTool, type DelegateToolDeps } from '../actions/tools/delegate.ts';
+import { createManageAgentsTool, type AgentToolDeps } from '../actions/tools/agents.ts';
+import { contentPipelineTool } from '../actions/tools/content.ts';
+import { commitmentsTool } from '../actions/tools/commitments.ts';
+import { researchQueueTool } from '../actions/tools/research.ts';
+import { AgentTaskManager } from '../agents/task-manager.ts';
+import { discoverSpecialists, formatSpecialistList } from '../agents/role-discovery.ts';
 import { buildSystemPrompt, type PromptContext } from '../roles/prompt-builder.ts';
+import type { ProgressCallback } from '../agents/sub-agent-runner.ts';
 import {
   getPersonality,
   savePersonality,
@@ -33,10 +43,14 @@ import {
   recordInteraction,
 } from '../personality/learner.ts';
 import { getDueCommitments, getUpcoming } from '../vault/commitments.ts';
+import { findContent } from '../vault/content-pipeline.ts';
 import { getRecentObservations } from '../vault/observations.ts';
 import { extractAndStore } from '../vault/extractor.ts';
+import { getKnowledgeForMessage } from '../vault/retrieval.ts';
+import type { ResearchQueue } from './research-queue.ts';
+import type { IAgentService } from './agent-service-interface.ts';
 
-export class AgentService implements Service {
+export class AgentService implements Service, IAgentService {
   name = 'agent';
   private _status: ServiceStatus = 'stopped';
   private config: JarvisConfig;
@@ -44,11 +58,52 @@ export class AgentService implements Service {
   private orchestrator: AgentOrchestrator;
   private role: RoleDefinition | null = null;
   private personality: PersonalityModel | null = null;
+  private specialists: Map<string, RoleDefinition> = new Map();
+  private specialistListText: string = '';
+  private delegationProgressCallback: ProgressCallback | null = null;
+  private delegationCallback: ((specialistName: string, task: string) => void) | null = null;
+  private researchQueue: ResearchQueue | null = null;
+  private taskManager: AgentTaskManager | null = null;
 
   constructor(config: JarvisConfig) {
     this.config = config;
     this.llmManager = new LLMManager();
     this.orchestrator = new AgentOrchestrator();
+  }
+
+  /**
+   * Set callback for sub-agent progress events (delegation visibility).
+   * Typically wired to WebSocket broadcast by the daemon.
+   */
+  setDelegationProgressCallback(cb: ProgressCallback): void {
+    this.delegationProgressCallback = cb;
+  }
+
+  /**
+   * Set callback fired when the PA delegates a task to a specialist.
+   * Used by ws-service to update task board ownership in real time.
+   */
+  setDelegationCallback(cb: (specialistName: string, task: string) => void): void {
+    this.delegationCallback = cb;
+  }
+
+  /**
+   * Set the research queue for idle-time background research.
+   */
+  setResearchQueue(queue: ResearchQueue): void {
+    this.researchQueue = queue;
+  }
+
+  getOrchestrator(): AgentOrchestrator {
+    return this.orchestrator;
+  }
+
+  getLLMManager(): LLMManager {
+    return this.llmManager;
+  }
+
+  getTaskManager(): AgentTaskManager | null {
+    return this.taskManager;
   }
 
   async start(): Promise<void> {
@@ -64,10 +119,74 @@ export class AgentService implements Service {
       // 3. Wire LLM manager to orchestrator
       this.orchestrator.setLLMManager(this.llmManager);
 
-      // 4. Create primary agent
+      // 4. Discover specialist roles
+      this.specialists = discoverSpecialists('roles/specialists');
+      if (this.specialists.size > 0) {
+        this.specialistListText = formatSpecialistList(this.specialists);
+        console.log(`[AgentService] Discovered ${this.specialists.size} specialists: ${Array.from(this.specialists.keys()).join(', ')}`);
+      }
+
+      // 5. Register tools (builtin + delegation)
+      const toolRegistry = new ToolRegistry();
+      for (const tool of BUILTIN_TOOLS) {
+        toolRegistry.register(tool);
+      }
+
+      // Register content pipeline tool
+      toolRegistry.register(contentPipelineTool);
+
+      // Register commitments tool
+      toolRegistry.register(commitmentsTool);
+
+      // Register research queue tool
+      toolRegistry.register(researchQueueTool);
+
+      // Register delegate_task tool if specialists are available
+      if (this.specialists.size > 0) {
+        const delegateDeps: DelegateToolDeps = {
+          orchestrator: this.orchestrator,
+          llmManager: this.llmManager,
+          specialists: this.specialists,
+          onProgress: (event) => {
+            if (this.delegationProgressCallback) {
+              this.delegationProgressCallback(event);
+            }
+          },
+          onDelegation: (specialistName, task) => {
+            if (this.delegationCallback) {
+              this.delegationCallback(specialistName, task);
+            }
+          },
+        };
+        const delegateTool = createDelegateTool(delegateDeps);
+        toolRegistry.register(delegateTool);
+        console.log('[AgentService] Registered delegate_task tool');
+
+        // Register manage_agents tool for persistent/async agents
+        this.taskManager = new AgentTaskManager();
+        const agentToolDeps: AgentToolDeps = {
+          orchestrator: this.orchestrator,
+          llmManager: this.llmManager,
+          specialists: this.specialists,
+          taskManager: this.taskManager,
+          onProgress: (event) => {
+            if (this.delegationProgressCallback) {
+              this.delegationProgressCallback(event);
+            }
+          },
+        };
+        const agentTool = createManageAgentsTool(agentToolDeps);
+        toolRegistry.register(agentTool);
+        console.log('[AgentService] Registered manage_agents tool');
+      }
+
+      this.orchestrator.setToolRegistry(toolRegistry);
+      console.log(`[AgentService] Registered ${toolRegistry.count()} tools total`);
+
+      // 6. Create primary agent
       this.orchestrator.createPrimary(this.role);
 
-      // 5. Load personality
+      // 7. Load personality
       this.personality = getPersonality();
 
       this._status = 'running';
@@ -84,6 +203,20 @@ export class AgentService implements Service {
     if (primary) {
       this.orchestrator.terminateAgent(primary.id);
     }
+
+    // Disconnect browser (stops auto-launched Chrome if any)
+    if (browser.connected) {
+      await browser.disconnect();
+    }
+
+    // Disconnect desktop sidecar if connected
+    try {
+      const { desktop } = await import('../actions/tools/desktop.ts');
+      if (desktop.connected) {
+        await desktop.disconnect();
+      }
+    } catch { /* ignore */ }
+
     this._status = 'stopped';
     console.log('[AgentService] Stopped');
   }
@@ -99,16 +232,12 @@ export class AgentService implements Service {
     stream: AsyncIterable<LLMStreamEvent>;
     onComplete: (fullText: string) => Promise<void>;
   } {
-    const systemPrompt = this.buildFullSystemPrompt(channel);
+    const systemPrompt = this.buildFullSystemPrompt(channel, text);
 
     const stream = this.orchestrator.streamMessage(systemPrompt, text);
 
     const onComplete = async (fullText: string): Promise<void> => {
-      // Add assistant response to history
-      const primary = this.orchestrator.getPrimary();
-      if (primary) {
-        primary.addMessage('assistant', fullText);
-      }
+      // Note: orchestrator already adds assistant response to history
 
       // Fire-and-forget: extract knowledge into vault
       this.extractKnowledge(text, fullText).catch((err) =>
@@ -128,7 +257,7 @@ export class AgentService implements Service {
    * Non-streaming message handler. Returns full response string.
    */
   async handleMessage(text: string, channel: string = 'websocket'): Promise<string> {
-    const systemPrompt = this.buildFullSystemPrompt(channel);
+    const systemPrompt = this.buildFullSystemPrompt(channel, text);
 
     const response = await this.orchestrator.processMessage(systemPrompt, text);
 
@@ -146,13 +275,35 @@ export class AgentService implements Service {
   }
 
   /**
-   * Handle periodic heartbeat. Returns proactive message or null.
+   * Handle periodic heartbeat with full tool access.
+   * Accepts optional coalesced event summary to include in the prompt.
+   * Uses processMessage() so the agent can take action (browse, run commands, etc.).
    */
-  async handleHeartbeat(): Promise<string | null> {
+  async handleHeartbeat(coalescedEvents?: string): Promise<string | null> {
     if (!this.role) return null;
 
-    const systemPrompt = this.buildHeartbeatPrompt();
-    return this.orchestrator.heartbeat(systemPrompt);
+    const systemPrompt = this.buildHeartbeatPrompt(coalescedEvents);
+
+    // Build the heartbeat "user message" that triggers the agent
+    const parts: string[] = ['[HEARTBEAT] Periodic check-in. Review your responsibilities and take action.'];
+
+    if (coalescedEvents) {
+      parts.push('');
+      parts.push(coalescedEvents);
+    }
+
+    const heartbeatMessage = parts.join('\n');
+
+    try {
+      const response = await this.orchestrator.processMessage(systemPrompt, heartbeatMessage);
+      if (response && response.trim().length > 0) {
+        return response;
+      }
+      return null;
+    } catch (err) {
+      console.error('[AgentService] Heartbeat processing error:', err);
+      return null;
+    }
   }
 
   // --- Private methods ---
@@ -243,11 +394,11 @@ export class AgentService implements Service {
     );
   }
 
-  private buildFullSystemPrompt(channel: string): string {
+  private buildFullSystemPrompt(channel: string, userMessage?: string): string {
     if (!this.role) return '';
 
-    // Build prompt context with live data
-    const context = this.buildPromptContext();
+    // Build prompt context with live data + vault knowledge
+    const context = this.buildPromptContext(userMessage);
 
     // Build base system prompt from role + context
     const rolePrompt = buildSystemPrompt(this.role, context);
@@ -260,20 +411,64 @@ export class AgentService implements Service {
     return `${rolePrompt}\n\n${personalityPrompt}`;
   }
 
-  private buildHeartbeatPrompt(): string {
+  private buildHeartbeatPrompt(coalescedEvents?: string): string {
     if (!this.role) return '';
 
     const context = this.buildPromptContext();
     const rolePrompt = buildSystemPrompt(this.role, context);
 
-    // Append heartbeat-specific instructions
-    return `${rolePrompt}\n\n# Heartbeat Check\n${this.role.heartbeat_instructions}`;
+    const parts = [rolePrompt, '', '# Heartbeat Check', this.role.heartbeat_instructions];
+
+    if (coalescedEvents) {
+      parts.push('', '# Recent System Events', coalescedEvents);
+    }
+
+    // Inject commitment execution instructions
+    parts.push('', '# COMMITMENT EXECUTION');
+    parts.push('If any commitments are overdue or due soon, EXECUTE them now using your tools.');
+    parts.push('Do not just mention them — actually perform the work. Use browse, terminal, file operations as needed.');
+
+    // Inject background research instructions when idle
+    if (this.researchQueue && this.researchQueue.queuedCount() > 0) {
+      const next = this.researchQueue.getNext();
+      if (next) {
+        parts.push('', '# BACKGROUND RESEARCH');
+        parts.push(`You have a research topic queued: "${next.topic}"`);
+        parts.push(`Reason: ${next.reason}`);
+        parts.push(`Research ID: ${next.id}`);
+        parts.push('If nothing urgent needs your attention, research this topic now.');
+        parts.push('Use your browser and tools to gather information, then use the research_queue tool with action "complete" to save your findings.');
+      }
+    } else {
+      parts.push('', '# IDLE MODE');
+      parts.push('No research topics queued. If nothing urgent, you may:');
+      parts.push('- Check news or trends relevant to the user');
+      parts.push('- Review and organize pending tasks');
+      parts.push('- Or simply report "All clear" if nothing needs attention');
+    }
+
+    parts.push('', '# Important', 'You have full tool access during this heartbeat. If you need to take action (browse the web, run commands, check files), DO IT. Be proactive and aggressive about helping.');
+
+    return parts.join('\n');
   }
 
-  private buildPromptContext(): PromptContext {
+  private buildPromptContext(userMessage?: string): PromptContext {
     const context: PromptContext = {
       currentTime: new Date().toISOString(),
+      availableSpecialists: this.specialistListText || undefined,
     };
+
+    // Retrieve relevant knowledge from vault based on user message
+    if (userMessage) {
+      try {
+        const knowledge = getKnowledgeForMessage(userMessage);
+        if (knowledge) {
+          context.knowledgeContext = knowledge;
+        }
+      } catch (err) {
+        console.error('[AgentService] Error retrieving knowledge:', err);
+      }
+    }
 
     // Get due commitments
     try {
@@ -291,6 +486,21 @@ export class AgentService implements Service {
       }
     } catch (err) {
       console.error('[AgentService] Error loading commitments:', err);
+    }
+
+    // Get active content pipeline items (not published)
+    try {
+      const activeContent = findContent({}).filter(
+        (c) => c.stage !== 'published'
+      ).slice(0, 10);
+      if (activeContent.length > 0) {
+        context.contentPipeline = activeContent.map((c) => {
+          const tags = c.tags.length > 0 ? ` [${c.tags.join(', ')}]` : '';
+          return `"${c.title}" (${c.content_type}) — ${c.stage}${tags}`;
+        });
+      }
+    } catch (err) {
+      console.error('[AgentService] Error loading content pipeline:', err);
     }
 
     // Get recent observations

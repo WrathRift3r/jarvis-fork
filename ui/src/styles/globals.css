@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+:root {
+  --j-bg: #0a0e17;
+  --j-surface: #111827;
+  --j-surface-hover: #1a2234;
+  --j-border: #1e293b;
+  --j-border-bright: #334155;
+  --j-accent: #00d4ff;
+  --j-accent-dim: #0891b2;
+  --j-accent2: #7c3aed;
+  --j-success: #10b981;
+  --j-warning: #f59e0b;
+  --j-error: #ef4444;
+  --j-text: #e2e8f0;
+  --j-text-dim: #94a3b8;
+  --j-text-muted: #64748b;
+  --j-glow: 0 0 20px rgba(0, 212, 255, 0.15);
+  --j-glow-strong: 0 0 30px rgba(0, 212, 255, 0.3);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--j-bg);
+  color: var(--j-text);
+  font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--j-border-bright);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--j-text-muted);
+}
+
+/* Selection */
+::selection {
+  background: rgba(0, 212, 255, 0.3);
+  color: white;
+}
+
+/* Task card update pulse */
+@keyframes taskPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(0, 212, 255, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 16px 4px rgba(0, 212, 255, 0.15);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 212, 255, 0);
+  }
+}

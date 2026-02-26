@@ -149,9 +149,13 @@ function createTables(db: Database): void {
       assigned_to TEXT,
       created_at INTEGER NOT NULL,
       completed_at INTEGER,
-      result TEXT
+      result TEXT,
+      sort_order INTEGER DEFAULT 0
     )
   `);
+
+  // Migration: add sort_order to existing databases
+  try { db.exec('ALTER TABLE commitments ADD COLUMN sort_order INTEGER DEFAULT 0'); } catch {}
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_commitments_status ON commitments(status)
@@ -159,6 +163,10 @@ function createTables(db: Database): void {
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_commitments_due ON commitments(when_due)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_commitments_sort ON commitments(status, sort_order)
   `);
 
   // Observations table: raw events from the observation layer
@@ -251,4 +259,80 @@ function createTables(db: Database): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel)
   `);
+
+  // Conversation messages table: individual chat messages
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversation_messages (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+      content TEXT NOT NULL,
+      tool_calls TEXT,
+      created_at INTEGER NOT NULL
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_conv_msg_conv ON conversation_messages(conversation_id)
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_conv_msg_time ON conversation_messages(created_at)
+  `);
+
+  // Content pipeline: items moving through creation stages
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS content_items (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      body TEXT DEFAULT '',
+      content_type TEXT NOT NULL DEFAULT 'blog'
+        CHECK(content_type IN ('youtube','blog','twitter','instagram','tiktok','linkedin','podcast','newsletter','short_form','other')),
+      stage TEXT NOT NULL DEFAULT 'idea'
+        CHECK(stage IN ('idea','research','outline','draft','assets','review','scheduled','published')),
+      tags TEXT,
+      scheduled_at INTEGER,
+      published_at INTEGER,
+      published_url TEXT,
+      created_by TEXT DEFAULT 'user',
+      sort_order INTEGER DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `);
+
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_content_stage ON content_items(stage)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_content_type ON content_items(content_type)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_content_sort ON content_items(stage, sort_order)`);
+
+  // Content pipeline: per-stage notes from user or JARVIS
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS content_stage_notes (
+      id TEXT PRIMARY KEY,
+      content_id TEXT NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
+      stage TEXT NOT NULL
+        CHECK(stage IN ('idea','research','outline','draft','assets','review','scheduled','published')),
+      note TEXT NOT NULL,
+      author TEXT NOT NULL DEFAULT 'user',
+      created_at INTEGER NOT NULL
+    )
+  `);
+
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_stage_notes_content ON content_stage_notes(content_id)`);
+
+  // Content pipeline: file/image attachments (files stored on disk)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS content_attachments (
+      id TEXT PRIMARY KEY,
+      content_id TEXT NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
+      filename TEXT NOT NULL,
+      disk_path TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      label TEXT,
+      created_at INTEGER NOT NULL
+    )
+  `);
+
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_attachments_content ON content_attachments(content_id)`);
 }

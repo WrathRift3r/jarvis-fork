@@ -29,6 +29,11 @@ export interface AppController {
   captureWindow(pid: number): Promise<Buffer>;
 
   focusWindow(pid: number): Promise<void>;
+
+  // Optional extended operations
+  launchApp?(executable: string, args?: string): Promise<object>;
+  closeWindow?(pid: number): Promise<void>;
+  dragElement?(from: UIElement, to: UIElement): Promise<void>;
 }
 
 export function getAppController(): AppController {
@@ -36,6 +41,12 @@ export function getAppController(): AppController {
 
   switch (platform) {
     case 'linux': {
+      // In WSL2, use DesktopController to control Windows desktop via sidecar
+      const { WSLBridge } = require('../terminal/wsl-bridge.ts');
+      if (WSLBridge.isWSL()) {
+        const { DesktopController } = require('./desktop-controller.ts');
+        return new DesktopController();
+      }
       const { LinuxAppController } = require('./linux.ts');
       return new LinuxAppController();
     }

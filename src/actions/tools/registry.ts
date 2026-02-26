@@ -1,8 +1,18 @@
+import type { ContentBlock } from '../../llm/provider.ts';
+
 export type ToolParameter = {
   type: string;
   description: string;
   required: boolean;
 };
+
+export type ToolResult = {
+  content: ContentBlock[];
+};
+
+export function isToolResult(v: unknown): v is ToolResult {
+  return v !== null && typeof v === 'object' && 'content' in (v as object) && Array.isArray((v as ToolResult).content);
+}
 
 export type ToolDefinition = {
   name: string;

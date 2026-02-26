@@ -1,44 +1,58 @@
 /**
- * CalendarSync - Syncs calendar events (STUB)
+ * CalendarSync — Google Calendar Observer
  *
- * TODO: Integrate with calendar APIs:
- * - Google Calendar API
- * - Microsoft Graph API (Outlook/Office 365)
- * - CalDAV for other providers
+ * Polls Calendar API every 2 minutes with a 30-minute look-ahead.
+ * Tracks announced event IDs to avoid duplicate alerts.
+ * Graceful: if no Google tokens, logs warning and stays no-op.
  */
 
-import type { Observer, ObserverEvent, ObserverEventHandler } from './index';
+import type { Observer, ObserverEventHandler } from './index';
+import type { GoogleAuth } from '../integrations/google-auth.ts';
+import { listUpcomingEvents } from '../integrations/google-api.ts';
+
+const POLL_INTERVAL_MS = 2 * 60_000;  // 2 minutes
+const LOOK_AHEAD_MS = 30 * 60_000;    // 30 minutes
 
 export class CalendarSync implements Observer {
   name = 'calendar';
   private running = false;
   private handler: ObserverEventHandler | null = null;
+  private pollTimer: Timer | null = null;
+  private googleAuth: GoogleAuth | null;
+  private announcedEventIds: Set<string> = new Set();
+  private calendarId: string;
+
+  constructor(googleAuth?: GoogleAuth, calendarId?: string) {
+    this.googleAuth = googleAuth ?? null;
+    this.calendarId = calendarId ?? 'primary';
+  }
 
   async start(): Promise<void> {
-    // TODO: Google Calendar API integration
-    //   1. Set up OAuth2 credentials
-    //   2. Use Google Calendar API v3
-    //   3. Poll for events or use push notifications (webhooks)
-    //   4. Emit events for: upcoming_event, event_created, event_updated, event_cancelled
-    //
-    // TODO: Microsoft Graph API integration
-    //   1. Set up Azure AD app registration
-    //   2. Use Microsoft Graph Calendar API
-    //   3. Subscribe to change notifications
-    //   4. Sync calendar events and emit observations
-    //
-    // TODO: CalDAV integration for generic calendar providers
-    //   1. Use CalDAV protocol for iCloud, Nextcloud, etc.
-    //   2. Poll for calendar updates
-    //   3. Parse iCalendar format
-
     this.running = true;
-    console.log('[calendar] Observer started (stub - configure Google Calendar or Outlook API)');
-    console.log('[calendar] TODO: Set up OAuth2 and configure calendar provider API');
+
+    if (!this.googleAuth || !this.googleAuth.isAuthenticated()) {
+      console.log('[calendar] No Google auth configured — calendar monitoring disabled');
+      console.log('[calendar] Run: bun run src/scripts/google-setup.ts to set up Calendar');
+      return;
+    }
+
+    console.log('[calendar] Observer started — polling Calendar every 2min (30min look-ahead)');
+
+    // Initial poll
+    this.poll();
+
+    // Set up recurring poll
+    this.pollTimer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
   }
 
   async stop(): Promise<void> {
     this.running = false;
+
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+
     console.log('[calendar] Observer stopped');
   }
 
@@ -50,44 +64,50 @@ export class CalendarSync implements Observer {
     this.handler = handler;
   }
 
-  // Example of what the implementation might look like (not functional):
-  //
-  // private async syncGoogleCalendar(): Promise<void> {
-  //   const oauth2Client = new google.auth.OAuth2(
-  //     process.env.GOOGLE_CLIENT_ID,
-  //     process.env.GOOGLE_CLIENT_SECRET,
-  //     process.env.GOOGLE_REDIRECT_URI
-  //   );
-  //
-  //   oauth2Client.setCredentials({
-  //     refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
-  //   });
-  //
-  //   const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-  //
-  //   const response = await calendar.events.list({
-  //     calendarId: 'primary',
-  //     timeMin: new Date().toISOString(),
-  //     maxResults: 10,
-  //     singleEvents: true,
-  //     orderBy: 'startTime',
-  //   });
-  //
-  //   for (const event of response.data.items || []) {
-  //     if (this.handler) {
-  //       this.handler({
-  //         type: 'calendar_event',
-  //         data: {
-  //           id: event.id,
-  //           title: event.summary,
-  //           start: event.start?.dateTime || event.start?.date,
-  //           end: event.end?.dateTime || event.end?.date,
-  //           location: event.location,
-  //           attendees: event.attendees?.map(a => a.email),
-  //         },
-  //         timestamp: Date.now(),
-  //       });
-  //     }
-  //   }
-  // }
+  private async poll(): Promise<void> {
+    if (!this.googleAuth || !this.handler) return;
+
+    try {
+      const accessToken = await this.googleAuth.getAccessToken();
+      const now = new Date();
+      const later = new Date(now.getTime() + LOOK_AHEAD_MS);
+
+      const events = await listUpcomingEvents(
+        accessToken,
+        this.calendarId,
+        now.toISOString(),
+        later.toISOString(),
+        10
+      );
+
+      for (const event of events) {
+        // Skip already-announced events
+        if (this.announcedEventIds.has(event.id)) continue;
+        this.announcedEventIds.add(event.id);
+
+        this.handler({
+          type: 'calendar',
+          data: {
+            id: event.id,
+            summary: event.summary,
+            description: event.description,
+            start: event.start,
+            end: event.end,
+            location: event.location,
+            attendees: event.attendees,
+            htmlLink: event.htmlLink,
+          },
+          timestamp: Date.now(),
+        });
+      }
+
+      // Cap announcedEventIds to prevent unbounded growth
+      if (this.announcedEventIds.size > 500) {
+        const arr = Array.from(this.announcedEventIds);
+        this.announcedEventIds = new Set(arr.slice(arr.length - 250));
+      }
+    } catch (err) {
+      console.error('[calendar] Poll error:', err);
+    }
+  }
 }

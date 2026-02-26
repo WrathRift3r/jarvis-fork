@@ -3,7 +3,19 @@ export { WebSocketServer, type WSMessage, type WSClientHandler } from './websock
 export { StreamRelay } from './streaming.ts';
 
 // Voice I/O
-export { WhisperSTT, LocalTTS, type STTProvider, type TTSProvider } from './voice.ts';
+export {
+  OpenAIWhisperSTT,
+  GroqWhisperSTT,
+  LocalWhisperSTT,
+  EdgeTTSProvider,
+  ElevenLabsTTSProvider,
+  createSTTProvider,
+  createTTSProvider,
+  listElevenLabsVoices,
+  splitIntoSentences,
+  type STTProvider,
+  type TTSProvider,
+} from './voice.ts';
 
 // Channel adapters
 export {

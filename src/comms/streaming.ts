@@ -1,6 +1,16 @@
 import type { LLMStreamEvent } from '../llm/provider.ts';
 import type { WebSocketServer, WSMessage } from './websocket.ts';
 
+export type RelayOptions = {
+  /** Called each time a complete sentence is available during streaming. */
+  onSentence?: (sentence: string) => void;
+  /** Called when all text is done streaming. */
+  onTextDone?: () => void;
+};
+
+// Sentence boundary: period, exclamation, question mark, colon followed by whitespace or end
+const SENTENCE_END_RE = /[.!?:]\s/;
+
 export class StreamRelay {
   private wsServer: WebSocketServer;
 
@@ -11,14 +21,35 @@ export class StreamRelay {
   /**
    * Relay LLM stream events to all connected WebSocket clients.
    * Accumulates and returns the complete response text.
+   * Optionally fires onSentence callback as complete sentences arrive.
    */
-  async relayStream(stream: AsyncIterable<LLMStreamEvent>, requestId: string): Promise<string> {
+  async relayStream(
+    stream: AsyncIterable<LLMStreamEvent>,
+    requestId: string,
+    options?: RelayOptions,
+  ): Promise<string> {
     let fullText = '';
+    let sentenceBuffer = '';
 
     try {
       for await (const event of stream) {
         if (event.type === 'text') {
           fullText += event.text;
+
+          // Sentence-level TTS callback
+          if (options?.onSentence) {
+            sentenceBuffer += event.text;
+            // Flush complete sentences from the buffer
+            let match: RegExpExecArray | null;
+            while ((match = SENTENCE_END_RE.exec(sentenceBuffer)) !== null) {
+              const end = match.index + match[0].length;
+              const sentence = sentenceBuffer.slice(0, end).trim();
+              if (sentence) {
+                options.onSentence(sentence);
+              }
+              sentenceBuffer = sentenceBuffer.slice(end);
+            }
+          }
 
           // Broadcast chunk to all connected clients
           const message: WSMessage = {
@@ -33,6 +64,22 @@ export class StreamRelay {
           };
 
           this.wsServer.broadcast(message);
+        } else if (event.type === 'tool_call') {
+          // Broadcast tool call notification to clients
+          const toolMessage: WSMessage = {
+            type: 'stream',
+            payload: {
+              tool_call: {
+                name: event.tool_call.name,
+                arguments: event.tool_call.arguments,
+              },
+              requestId,
+            },
+            id: requestId,
+            timestamp: Date.now(),
+          };
+
+          this.wsServer.broadcast(toolMessage);
         } else if (event.type === 'error') {
           console.error('[StreamRelay] Stream error:', event.error);
 
@@ -48,6 +95,13 @@ export class StreamRelay {
 
           this.wsServer.broadcast(errorMessage);
         } else if (event.type === 'done') {
+          // Flush remaining sentence buffer
+          if (options?.onSentence && sentenceBuffer.trim()) {
+            options.onSentence(sentenceBuffer.trim());
+            sentenceBuffer = '';
+          }
+          options?.onTextDone?.();
+
           console.log('[StreamRelay] Stream complete for request:', requestId);
 
           const doneMessage: WSMessage = {
@@ -56,7 +110,7 @@ export class StreamRelay {
               status: 'done',
               requestId,
               fullText,
-              usage: event.usage,
+              usage: event.response.usage,
             },
             id: requestId,
             timestamp: Date.now(),

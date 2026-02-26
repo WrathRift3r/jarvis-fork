@@ -6,6 +6,9 @@ export type PromptContext = {
   activeCommitments?: string[];
   recentObservations?: string[];
   agentHierarchy?: string;
+  knowledgeContext?: string;
+  availableSpecialists?: string;
+  contentPipeline?: string[];
 };
 
 /**
@@ -53,6 +56,8 @@ export function buildSystemPrompt(role: RoleDefinition, context?: PromptContext)
   sections.push(`Tone: ${role.communication_style.tone}.`);
   sections.push(`Verbosity: ${role.communication_style.verbosity}.`);
   sections.push(`Formality: ${role.communication_style.formality}.`);
+  sections.push('');
+  sections.push('**Task Acknowledgment**: When asked to perform a task that requires tool use, ALWAYS give a brief acknowledgment first (e.g., "On it.", "Let me check.", "I\'ll look into that.") before using any tools. Never silently start executing tools — the user should know you understood their request.');
   sections.push('');
 
   // KPIs
@@ -119,6 +124,18 @@ export function buildSystemPrompt(role: RoleDefinition, context?: PromptContext)
       sections.push(context.agentHierarchy);
     }
 
+    if (context.availableSpecialists) {
+      sections.push('');
+      sections.push(context.availableSpecialists);
+    }
+
+    if (context.knowledgeContext) {
+      sections.push('');
+      sections.push('## Relevant Knowledge');
+      sections.push('The following is what you remember about entities mentioned in this conversation:');
+      sections.push(context.knowledgeContext);
+    }
+
     if (context.activeCommitments && context.activeCommitments.length > 0) {
       sections.push('');
       sections.push('## Active Commitments');
@@ -132,6 +149,15 @@ export function buildSystemPrompt(role: RoleDefinition, context?: PromptContext)
       sections.push('## Recent Activity');
       for (const observation of context.recentObservations) {
         sections.push(`- ${observation}`);
+      }
+    }
+
+    if (context.contentPipeline && context.contentPipeline.length > 0) {
+      sections.push('');
+      sections.push('## Content Pipeline');
+      sections.push('Active content items you are co-managing:');
+      for (const item of context.contentPipeline) {
+        sections.push(`- ${item}`);
       }
     }
 

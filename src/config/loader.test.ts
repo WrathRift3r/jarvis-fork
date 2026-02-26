@@ -93,7 +93,7 @@ describe('Default Config', () => {
     expect(DEFAULT_CONFIG.authority).toBeDefined();
     expect(DEFAULT_CONFIG.authority.default_level).toBe(3);
 
-    expect(DEFAULT_CONFIG.active_role).toBe('default');
+    expect(DEFAULT_CONFIG.active_role).toBe('personal-assistant');
   });
 
   test('has correct personality traits', () => {

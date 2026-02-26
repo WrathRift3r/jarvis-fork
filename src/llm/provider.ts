@@ -1,6 +1,12 @@
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
+
 export type LLMMessage = {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | ContentBlock[];
+  tool_calls?: LLMToolCall[];   // present on assistant messages with tool use
+  tool_call_id?: string;        // present on tool result messages
 };
 
 export type LLMTool = {
@@ -42,4 +48,13 @@ export interface LLMProvider {
   chat(messages: LLMMessage[], options?: LLMOptions): Promise<LLMResponse>;
   stream(messages: LLMMessage[], options?: LLMOptions): AsyncIterable<LLMStreamEvent>;
   listModels(): Promise<string[]>;
+}
+
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB base64 limit
+
+export function guardImageSize(block: ContentBlock): ContentBlock {
+  if (block.type === 'image' && block.source.data.length > MAX_IMAGE_BYTES) {
+    return { type: 'text', text: '[Image too large to send — saved to disk instead]' };
+  }
+  return block;
 }

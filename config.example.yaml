@@ -2,7 +2,7 @@
 # Copy to ~/.jarvis/config.yaml and customize
 
 daemon:
-  port: 7777
+  port: 3142
   data_dir: "~/.jarvis"
   db_path: "~/.jarvis/jarvis.db"
 
@@ -48,5 +48,26 @@ authority:
   # 5: Full control
   default_level: 3
 
-# Active role configuration file
-active_role: "default"
+# Text-to-Speech (voice output)
+tts:
+  enabled: false
+  provider: "edge"            # "edge" (free) or "elevenlabs" (API key required)
+  voice: "en-US-AriaNeural"  # Microsoft Edge TTS voice
+  rate: "+0%"                 # Speaking rate: "-20%" (slow) to "+30%" (fast)
+  volume: "+0%"               # Volume adjustment
+  # ElevenLabs (uncomment to use)
+  # elevenlabs:
+  #   api_key: "sk_..."
+  #   voice_id: ""             # Leave empty for default voice, or set a specific voice ID
+  #   model: "eleven_flash_v2_5"  # "eleven_flash_v2_5" (fast) or "eleven_multilingual_v2" (quality)
+  #   stability: 0.5
+  #   similarity_boost: 0.75
+
+# Speech-to-Text (voice input)
+# stt:
+#   provider: "openai"         # openai, groq, or local
+#   openai:
+#     api_key: "sk-..."
+
+# Active role (must match a filename in roles/ without extension)
+active_role: "personal-assistant"

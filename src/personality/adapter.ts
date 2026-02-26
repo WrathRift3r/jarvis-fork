@@ -49,6 +49,15 @@ const CHANNEL_DEFAULTS: Record<string, Partial<PersonalityModel>> = {
       preferred_format: 'adaptive',
     },
   },
+  discord: {
+    learned_preferences: {
+      verbosity: 4,
+      formality: 3,
+      humor_level: 5,
+      emoji_usage: true,
+      preferred_format: 'lists',
+    },
+  },
 };
 
 /**

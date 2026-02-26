@@ -22,6 +22,7 @@ export type Commitment = {
   created_at: number;
   completed_at: number | null;
   result: string | null;
+  sort_order: number;
 };
 
 type CommitmentRow = {
@@ -37,6 +38,7 @@ type CommitmentRow = {
   created_at: number;
   completed_at: number | null;
   result: string | null;
+  sort_order: number;
 };
 
 /**
@@ -100,6 +102,7 @@ export function createCommitment(
     created_at: now,
     completed_at: null,
     result: null,
+    sort_order: 0,
   };
 }
 
@@ -151,7 +154,7 @@ export function findCommitments(query: {
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const stmt = db.prepare(`SELECT * FROM commitments ${where} ORDER BY created_at DESC`);
+  const stmt = db.prepare(`SELECT * FROM commitments ${where} ORDER BY sort_order ASC, created_at DESC`);
   const rows = stmt.all(...params) as CommitmentRow[];
 
   return rows.map(parseCommitment);
@@ -228,4 +231,69 @@ export function getDueCommitments(): Commitment[] {
   const rows = stmt.all(now) as CommitmentRow[];
 
   return rows.map(parseCommitment);
+}
+
+/**
+ * Update a commitment's status to any valid status.
+ * Sets completed_at for terminal states (completed, failed).
+ */
+export function updateCommitmentStatus(
+  id: string,
+  status: CommitmentStatus,
+  result?: string
+): Commitment | null {
+  const db = getDb();
+  const commitment = getCommitment(id);
+  if (!commitment) return null;
+
+  const isTerminal = status === 'completed' || status === 'failed';
+  const completedAt = isTerminal ? Date.now() : null;
+
+  db.prepare(
+    'UPDATE commitments SET status = ?, completed_at = ?, result = ? WHERE id = ?'
+  ).run(status, completedAt, result ?? null, id);
+
+  return getCommitment(id);
+}
+
+/**
+ * Update a commitment's assigned_to field.
+ */
+export function updateCommitmentAssignee(id: string, assignedTo: string): Commitment | null {
+  const db = getDb();
+  const commitment = getCommitment(id);
+  if (!commitment) return null;
+
+  db.prepare('UPDATE commitments SET assigned_to = ? WHERE id = ?').run(assignedTo, id);
+  return getCommitment(id);
+}
+
+/**
+ * Update a commitment's due date.
+ */
+export function updateCommitmentDue(id: string, when_due: number | null): Commitment | null {
+  const db = getDb();
+  const commitment = getCommitment(id);
+  if (!commitment) return null;
+
+  db.prepare('UPDATE commitments SET when_due = ? WHERE id = ?').run(when_due, id);
+  return getCommitment(id);
+}
+
+/**
+ * Bulk update sort order for commitments (used by kanban drag & drop).
+ */
+export function reorderCommitments(
+  items: { id: string; sort_order: number }[]
+): void {
+  const db = getDb();
+  const stmt = db.prepare('UPDATE commitments SET sort_order = ? WHERE id = ?');
+
+  const transaction = db.transaction(() => {
+    for (const item of items) {
+      stmt.run(item.sort_order, item.id);
+    }
+  });
+
+  transaction();
 }

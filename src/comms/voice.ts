@@ -1,94 +1,291 @@
+import type { STTConfig, TTSConfig } from '../config/types.ts';
+import { Communicate } from 'edge-tts-universal';
+
 export interface STTProvider {
   transcribe(audio: Buffer): Promise<string>;
 }
 
 export interface TTSProvider {
   synthesize(text: string): Promise<Buffer>;
+  synthesizeStream(text: string): AsyncIterable<Buffer>;
 }
 
 /**
- * Whisper STT Provider (Speech-to-Text)
- * Stub implementation - requires local Whisper API setup
+ * OpenAI Whisper STT — uses the OpenAI /v1/audio/transcriptions endpoint.
  */
-export class WhisperSTT implements STTProvider {
-  private endpoint: string;
+export class OpenAIWhisperSTT implements STTProvider {
+  private apiKey: string;
+  private model: string;
 
-  constructor(endpoint: string = 'http://localhost:8080') {
-    this.endpoint = endpoint;
+  constructor(apiKey: string, model: string = 'whisper-1') {
+    this.apiKey = apiKey;
+    this.model = model;
   }
 
   async transcribe(audio: Buffer): Promise<string> {
-    throw new Error(
-      'Whisper STT not yet implemented. Install whisper.cpp and configure endpoint at: ' +
-      this.endpoint
-    );
+    const formData = new FormData();
+    formData.append('file', new Blob([audio], { type: 'audio/webm' }), 'audio.webm');
+    formData.append('model', this.model);
+    formData.append('language', 'en');
 
-    // Future implementation would:
-    // 1. Send audio buffer to whisper.cpp HTTP API
-    // 2. Parse response JSON for transcribed text
-    // 3. Return text
-    //
-    // Example:
-    // const formData = new FormData();
-    // formData.append('file', new Blob([audio]), 'audio.wav');
-    // const response = await fetch(`${this.endpoint}/inference`, {
-    //   method: 'POST',
-    //   body: formData,
-    // });
-    // const result = await response.json();
-    // return result.text;
+    const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${this.apiKey}` },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`OpenAI STT error (${response.status}): ${err}`);
+    }
+
+    const result = await response.json();
+    return result.text;
   }
 }
 
 /**
- * Local TTS Provider (Text-to-Speech)
- * Stub implementation - requires TTS engine setup (ElevenLabs API or local)
+ * Groq Whisper STT — uses Groq's OpenAI-compatible transcriptions endpoint.
  */
-export class LocalTTS implements TTSProvider {
-  private config: {
-    provider: 'elevenlabs' | 'local';
-    apiKey?: string;
-    voiceId?: string;
-    endpoint?: string;
-  };
+export class GroqWhisperSTT implements STTProvider {
+  private apiKey: string;
+  private model: string;
 
-  constructor(config?: Partial<LocalTTS['config']>) {
-    this.config = {
-      provider: 'local',
-      endpoint: 'http://localhost:5002',
-      ...config,
-    };
+  constructor(apiKey: string, model: string = 'whisper-large-v3-turbo') {
+    this.apiKey = apiKey;
+    this.model = model;
+  }
+
+  async transcribe(audio: Buffer): Promise<string> {
+    const formData = new FormData();
+    formData.append('file', new Blob([audio], { type: 'audio/webm' }), 'audio.webm');
+    formData.append('model', this.model);
+    formData.append('language', 'en');
+
+    const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${this.apiKey}` },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Groq STT error (${response.status}): ${err}`);
+    }
+
+    const result = await response.json();
+    return result.text;
+  }
+}
+
+/**
+ * Local Whisper STT — connects to a whisper.cpp HTTP server or compatible endpoint.
+ */
+export class LocalWhisperSTT implements STTProvider {
+  private endpoint: string;
+  private model: string;
+
+  constructor(endpoint: string = 'http://localhost:8080', model?: string) {
+    this.endpoint = endpoint;
+    this.model = model ?? 'base';
+  }
+
+  async transcribe(audio: Buffer): Promise<string> {
+    const formData = new FormData();
+    formData.append('file', new Blob([audio], { type: 'audio/webm' }), 'audio.webm');
+    formData.append('model', this.model);
+    formData.append('language', 'en');
+
+    const response = await fetch(`${this.endpoint}/inference`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Local Whisper STT error (${response.status}): ${err}`);
+    }
+
+    const result = await response.json();
+    return result.text;
+  }
+}
+
+/**
+ * Factory: create the right STT provider from config.
+ * Returns null if the selected provider lacks required credentials.
+ */
+export function createSTTProvider(config: STTConfig): STTProvider | null {
+  switch (config.provider) {
+    case 'openai':
+      if (!config.openai?.api_key) return null;
+      return new OpenAIWhisperSTT(config.openai.api_key, config.openai.model);
+    case 'groq':
+      if (!config.groq?.api_key) return null;
+      return new GroqWhisperSTT(config.groq.api_key, config.groq.model);
+    case 'local':
+      return new LocalWhisperSTT(config.local?.endpoint, config.local?.model);
+    default:
+      return null;
+  }
+}
+
+/**
+ * Edge TTS Provider — uses Microsoft Edge's online TTS service (free, no API key).
+ * Runs server-side only (browser WebSocket can't set required headers).
+ */
+export class EdgeTTSProvider implements TTSProvider {
+  private voice: string;
+  private rate: string;
+  private volume: string;
+
+  constructor(voice = 'en-US-AriaNeural', rate = '+0%', volume = '+0%') {
+    this.voice = voice;
+    this.rate = rate;
+    this.volume = volume;
   }
 
   async synthesize(text: string): Promise<Buffer> {
-    throw new Error(
-      'TTS not yet implemented. Configure ElevenLabs API or local TTS engine. ' +
-      `Current provider: ${this.config.provider}, endpoint: ${this.config.endpoint}`
+    const comm = new Communicate(text, {
+      voice: this.voice,
+      rate: this.rate,
+      volume: this.volume,
+    });
+    const chunks: Buffer[] = [];
+    for await (const chunk of comm.stream()) {
+      if (chunk.type === 'audio' && chunk.data) {
+        chunks.push(chunk.data);
+      }
+    }
+    return Buffer.concat(chunks);
+  }
+
+  /**
+   * Streaming variant: synthesizes text and yields a single complete MP3 buffer.
+   * Called per-sentence so the caller can pipeline multiple sentences.
+   * Each yielded buffer is a valid, decodable MP3 file.
+   */
+  async *synthesizeStream(text: string): AsyncIterable<Buffer> {
+    // Collect all chunks into a complete MP3 — individual edge-tts
+    // fragments are not valid standalone audio files
+    const audio = await this.synthesize(text);
+    if (audio.length > 0) {
+      yield audio;
+    }
+  }
+}
+
+/**
+ * ElevenLabs TTS Provider — high-quality personalized voices via ElevenLabs API.
+ * Supports true streaming (chunks are valid playable audio).
+ */
+export class ElevenLabsTTSProvider implements TTSProvider {
+  private apiKey: string;
+  private voiceId: string;
+  private model: string;
+  private stability: number;
+  private similarityBoost: number;
+
+  constructor(config: NonNullable<TTSConfig['elevenlabs']>) {
+    this.apiKey = config.api_key;
+    this.voiceId = config.voice_id ?? '21m00Tcm4TlvDq8ikWAM'; // Rachel (default)
+    this.model = config.model ?? 'eleven_flash_v2_5';
+    this.stability = config.stability ?? 0.5;
+    this.similarityBoost = config.similarity_boost ?? 0.75;
+  }
+
+  async synthesize(text: string): Promise<Buffer> {
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream?output_format=mp3_44100_128`,
+      {
+        method: 'POST',
+        headers: {
+          'xi-api-key': this.apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+          model_id: this.model,
+          voice_settings: {
+            stability: this.stability,
+            similarity_boost: this.similarityBoost,
+          },
+        }),
+      }
     );
 
-    // Future ElevenLabs implementation:
-    // if (this.config.provider === 'elevenlabs') {
-    //   const response = await fetch(
-    //     `https://api.elevenlabs.io/v1/text-to-speech/${this.config.voiceId}`,
-    //     {
-    //       method: 'POST',
-    //       headers: {
-    //         'Accept': 'audio/mpeg',
-    //         'Content-Type': 'application/json',
-    //         'xi-api-key': this.config.apiKey!,
-    //       },
-    //       body: JSON.stringify({ text }),
-    //     }
-    //   );
-    //   return Buffer.from(await response.arrayBuffer());
-    // }
-    //
-    // Future local TTS implementation (Coqui TTS, etc.):
-    // const response = await fetch(`${this.config.endpoint}/api/tts`, {
-    //   method: 'POST',
-    //   headers: { 'Content-Type': 'application/json' },
-    //   body: JSON.stringify({ text }),
-    // });
-    // return Buffer.from(await response.arrayBuffer());
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`ElevenLabs TTS error (${response.status}): ${err}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    return Buffer.from(arrayBuffer);
   }
+
+  async *synthesizeStream(text: string): AsyncIterable<Buffer> {
+    // Collect into a complete MP3 per sentence — individual streaming
+    // fragments are not decodable by the browser's AudioContext.decodeAudioData
+    const audio = await this.synthesize(text);
+    if (audio.length > 0) {
+      yield audio;
+    }
+  }
+}
+
+/**
+ * Fetch available voices from ElevenLabs API.
+ */
+export async function listElevenLabsVoices(apiKey: string): Promise<{
+  voice_id: string;
+  name: string;
+  category: string;
+}[]> {
+  const response = await fetch('https://api.elevenlabs.io/v1/voices', {
+    headers: { 'xi-api-key': apiKey },
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`ElevenLabs voices error (${response.status}): ${err}`);
+  }
+
+  const data = await response.json();
+  return (data.voices ?? []).map((v: any) => ({
+    voice_id: v.voice_id,
+    name: v.name,
+    category: v.category ?? 'unknown',
+  }));
+}
+
+/**
+ * Factory: create the right TTS provider from config.
+ * Returns null if TTS is disabled.
+ */
+export function createTTSProvider(config: TTSConfig): TTSProvider | null {
+  if (!config.enabled) return null;
+
+  if (config.provider === 'elevenlabs') {
+    if (!config.elevenlabs?.api_key) return null;
+    return new ElevenLabsTTSProvider(config.elevenlabs);
+  }
+
+  // Default: Edge TTS
+  return new EdgeTTSProvider(config.voice, config.rate, config.volume);
+}
+
+/**
+ * Split text into sentences for streaming TTS.
+ * Each sentence is synthesized and played independently for low latency.
+ */
+export function splitIntoSentences(text: string): string[] {
+  // Collapse code blocks to avoid splitting on periods inside code
+  const collapsed = text.replace(/```[\s\S]*?```/g, '[code block]');
+  // Split on sentence-ending punctuation followed by whitespace + capital letter,
+  // or on double newlines (paragraph breaks)
+  const sentences = collapsed
+    .split(/(?<=[.!?])\s+(?=[A-Z])|(?<=\n\n)/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+  return sentences.length > 0 ? sentences : [text];
 }

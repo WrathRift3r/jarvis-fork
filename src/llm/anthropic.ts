@@ -52,6 +52,9 @@ type AnthropicStreamEvent =
   | { type: 'message_stop' }
   | { type: 'error'; error: { type: string; message: string } };
 
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 5000; // 5s, 10s, 20s
+
 export class AnthropicProvider implements LLMProvider {
   name = 'anthropic';
   private apiKey: string;
@@ -63,8 +66,46 @@ export class AnthropicProvider implements LLMProvider {
     this.defaultModel = defaultModel;
   }
 
+  /**
+   * Make an API request with retry on rate limit (429) and server errors (5xx).
+   */
+  private async fetchWithRetry(body: string, stream: boolean = false): Promise<Response> {
+    const headers: Record<string, string> = {
+      'x-api-key': this.apiKey,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    };
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const response = await fetch(this.apiUrl, {
+        method: 'POST',
+        headers,
+        body,
+      });
+
+      if (response.ok) return response;
+
+      // Retry on rate limit (429) or server error (5xx)
+      if ((response.status === 429 || response.status >= 500) && attempt < MAX_RETRIES) {
+        const retryAfter = response.headers.get('retry-after');
+        const delay = retryAfter
+          ? parseInt(retryAfter, 10) * 1000
+          : RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+        console.log(`[Anthropic] ${response.status} — retrying in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await Bun.sleep(delay);
+        continue;
+      }
+
+      // Non-retryable error
+      const errorText = await response.text();
+      throw new Error(`Anthropic API error (${response.status}): ${errorText}`);
+    }
+
+    throw new Error('Anthropic API: max retries exceeded');
+  }
+
   async chat(messages: LLMMessage[], options: LLMOptions = {}): Promise<LLMResponse> {
-    const { model = this.defaultModel, temperature, max_tokens = 4096, tools } = options;
+    const { model = this.defaultModel, temperature, max_tokens = 16384, tools } = options;
 
     const { system, messages: anthropicMessages } = this.convertMessages(messages);
     const body: Record<string, unknown> = {
@@ -79,27 +120,13 @@ export class AnthropicProvider implements LLMProvider {
       body.tools = this.convertTools(tools);
     }
 
-    const response = await fetch(this.apiUrl, {
-      method: 'POST',
-      headers: {
-        'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Anthropic API error (${response.status}): ${errorText}`);
-    }
-
+    const response = await this.fetchWithRetry(JSON.stringify(body));
     const data = await response.json() as AnthropicResponse;
     return this.convertResponse(data);
   }
 
   async *stream(messages: LLMMessage[], options: LLMOptions = {}): AsyncIterable<LLMStreamEvent> {
-    const { model = this.defaultModel, temperature, max_tokens = 4096, tools } = options;
+    const { model = this.defaultModel, temperature, max_tokens = 16384, tools } = options;
 
     const { system, messages: anthropicMessages } = this.convertMessages(messages);
     const body: Record<string, unknown> = {
@@ -115,19 +142,11 @@ export class AnthropicProvider implements LLMProvider {
       body.tools = this.convertTools(tools);
     }
 
-    const response = await fetch(this.apiUrl, {
-      method: 'POST',
-      headers: {
-        'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      yield { type: 'error', error: `Anthropic API error (${response.status}): ${errorText}` };
+    let response: Response;
+    try {
+      response = await this.fetchWithRetry(JSON.stringify(body), true);
+    } catch (err) {
+      yield { type: 'error', error: err instanceof Error ? err.message : String(err) };
       return;
     }
 
@@ -188,12 +207,19 @@ export class AnthropicProvider implements LLMProvider {
                 const toolCall: LLMToolCall = {
                   id: currentToolCall.id,
                   name: currentToolCall.name,
-                  arguments: JSON.parse(currentToolCall.input_json),
+                  arguments: JSON.parse(currentToolCall.input_json || '{}'),
                 };
                 toolCalls.push(toolCall);
                 yield { type: 'tool_call', tool_call: toolCall };
               } catch (err) {
-                yield { type: 'error', error: `Failed to parse tool call arguments: ${err}` };
+                // Truncated JSON (e.g., max_tokens hit mid-tool-call)
+                // Warn the agent so it can retry with smaller chunks
+                const truncLen = currentToolCall.input_json?.length ?? 0;
+                console.error(`[Anthropic] Tool call '${currentToolCall.name}' truncated (${truncLen} chars of JSON). max_tokens likely hit.`);
+                const warning = `\n\n[SYSTEM WARNING: Your tool call to "${currentToolCall.name}" was truncated due to output token limits. ` +
+                  `The call was NOT executed. If you were writing long content, use append_body with shorter chunks (under 1000 words per call).]`;
+                accumulatedText += warning;
+                yield { type: 'text', text: warning };
               }
               currentToolCall = null;
             } else if (event.type === 'message_delta') {
@@ -245,14 +271,66 @@ export class AnthropicProvider implements LLMProvider {
     messages: AnthropicMessage[];
   } {
     const systemMessages = messages.filter(m => m.role === 'system');
-    const system = systemMessages.map(m => m.content).join('\n\n') || undefined;
+    const system = systemMessages.map(m => typeof m.content === 'string' ? m.content : m.content.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('\n')).join('\n\n') || undefined;
 
-    const anthropicMessages: AnthropicMessage[] = messages
-      .filter(m => m.role !== 'system')
-      .map(m => ({
-        role: m.role,
-        content: m.content,
-      }));
+    const anthropicMessages: AnthropicMessage[] = [];
+    const nonSystem = messages.filter(m => m.role !== 'system');
+
+    let i = 0;
+    while (i < nonSystem.length) {
+      const msg = nonSystem[i];
+
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        // Assistant message with tool use → content blocks
+        const content: Array<{ type: string; [key: string]: unknown }> = [];
+        if (msg.content) {
+          const textContent = typeof msg.content === 'string' ? msg.content : msg.content.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('\n');
+          if (textContent) content.push({ type: 'text', text: textContent });
+        }
+        for (const tc of msg.tool_calls) {
+          content.push({
+            type: 'tool_use',
+            id: tc.id,
+            name: tc.name,
+            input: tc.arguments,
+          });
+        }
+        anthropicMessages.push({ role: 'assistant', content });
+        i++;
+
+        // Collect subsequent tool result messages into a single user message
+        const toolResults: Array<{ type: string; [key: string]: unknown }> = [];
+        while (i < nonSystem.length && nonSystem[i].role === 'tool') {
+          const toolMsg = nonSystem[i];
+          // ContentBlock[] → pass as structured content (supports images)
+          // string → pass as-is (backward-compatible)
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolMsg.tool_call_id,
+            content: toolMsg.content,
+          });
+          i++;
+        }
+        if (toolResults.length > 0) {
+          anthropicMessages.push({ role: 'user', content: toolResults });
+        }
+      } else if (msg.role === 'tool') {
+        // Standalone tool result (shouldn't happen but handle gracefully)
+        anthropicMessages.push({
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: msg.tool_call_id, content: msg.content }],
+        });
+        i++;
+      } else {
+        // Regular user or assistant message
+        // ContentBlock[] passes through (supports images in user messages)
+        anthropicMessages.push({
+          role: msg.role as 'user' | 'assistant',
+          content: msg.content as string | Array<{ type: string; [key: string]: unknown }>,
+        });
+        i++;
+      }
+    }
 
     return { system, messages: anthropicMessages };
   }

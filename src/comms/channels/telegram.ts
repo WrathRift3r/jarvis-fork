@@ -1,3 +1,5 @@
+import type { STTProvider } from '../voice.ts';
+
 export type ChannelMessage = {
   id: string;
   channel: string;
@@ -34,6 +36,20 @@ type TelegramUpdate = {
     };
     date: number;
     text?: string;
+    voice?: {
+      duration: number;
+      mime_type: string;
+      file_id: string;
+      file_unique_id: string;
+      file_size?: number;
+    };
+    audio?: {
+      duration: number;
+      mime_type: string;
+      file_id: string;
+      file_unique_id: string;
+      file_size?: number;
+    };
   };
 };
 
@@ -49,11 +65,19 @@ export class TelegramAdapter implements ChannelAdapter {
   private polling: boolean = false;
   private offset: number = 0;
   private baseUrl: string;
-  private pollingInterval: number = 1000; // 1 second
+  private pollingInterval: number = 1000;
+  private sttProvider: STTProvider | null = null;
+  private allowedUsers: number[];
 
-  constructor(token: string) {
+  constructor(token: string, opts?: { sttProvider?: STTProvider; allowedUsers?: number[] }) {
     this.token = token;
     this.baseUrl = `https://api.telegram.org/bot${token}`;
+    this.sttProvider = opts?.sttProvider ?? null;
+    this.allowedUsers = opts?.allowedUsers ?? [];
+  }
+
+  setSTTProvider(provider: STTProvider): void {
+    this.sttProvider = provider;
   }
 
   async connect(): Promise<void> {
@@ -88,29 +112,38 @@ export class TelegramAdapter implements ChannelAdapter {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    try {
-      const response = await fetch(`${this.baseUrl}/sendMessage`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text,
-          parse_mode: 'Markdown',
-        }),
-      });
+    // Telegram has a 4096 char limit per message
+    const chunks = splitText(text, 4096);
+    for (const chunk of chunks) {
+      try {
+        const response = await fetch(`${this.baseUrl}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: chunk,
+            parse_mode: 'Markdown',
+          }),
+        });
 
-      const data = await response.json();
+        const data = await response.json();
 
-      if (!data.ok) {
-        throw new Error(`Telegram API error: ${data.description}`);
+        if (!data.ok) {
+          // Retry without Markdown if parsing failed
+          if (data.description?.includes('parse')) {
+            await fetch(`${this.baseUrl}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId, text: chunk }),
+            });
+          } else {
+            throw new Error(`Telegram API error: ${data.description}`);
+          }
+        }
+      } catch (error) {
+        console.error('[TelegramAdapter] Error sending message:', error);
+        throw error;
       }
-
-      console.log('[TelegramAdapter] Message sent to:', chatId);
-    } catch (error) {
-      console.error('[TelegramAdapter] Error sending message:', error);
-      throw error;
     }
   }
 
@@ -134,10 +167,8 @@ export class TelegramAdapter implements ChannelAdapter {
         }
       } catch (error) {
         console.error('[TelegramAdapter] Polling error:', error);
-        // Continue polling even on error
       }
 
-      // Wait before next poll
       await new Promise(resolve => setTimeout(resolve, this.pollingInterval));
     }
 
@@ -147,12 +178,10 @@ export class TelegramAdapter implements ChannelAdapter {
   private async getUpdates(): Promise<TelegramUpdate[]> {
     const response = await fetch(`${this.baseUrl}/getUpdates`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         offset: this.offset,
-        timeout: 30, // Long polling timeout
+        timeout: 30,
         allowed_updates: ['message'],
       }),
     });
@@ -163,7 +192,6 @@ export class TelegramAdapter implements ChannelAdapter {
       throw new Error('Failed to get updates');
     }
 
-    // Update offset to acknowledge processed updates
     if (data.result.length > 0) {
       this.offset = data.result[data.result.length - 1].update_id + 1;
     }
@@ -172,28 +200,61 @@ export class TelegramAdapter implements ChannelAdapter {
   }
 
   private async processUpdate(update: TelegramUpdate): Promise<void> {
-    if (!update.message?.text || !this.handler) {
+    if (!update.message || !this.handler) return;
+
+    const { message } = update;
+
+    // Security: check allowed users
+    if (this.allowedUsers.length > 0 && !this.allowedUsers.includes(message.from.id)) {
+      console.log(`[TelegramAdapter] Ignoring message from unauthorized user: ${message.from.id} (${message.from.username ?? message.from.first_name})`);
       return;
     }
 
-    const { message } = update;
+    let text = message.text ?? '';
+
+    // Handle voice/audio messages via STT
+    const voiceFile = message.voice ?? message.audio;
+    if (voiceFile && !text) {
+      if (!this.sttProvider) {
+        await this.sendMessage(
+          message.chat.id.toString(),
+          'Voice messages require STT configuration. Set up an STT provider in the Dashboard Settings.'
+        );
+        return;
+      }
+      try {
+        const audioBuffer = await this.downloadFile(voiceFile.file_id);
+        text = await this.sttProvider.transcribe(audioBuffer);
+        console.log('[TelegramAdapter] Transcribed voice:', text.slice(0, 80));
+      } catch (err) {
+        console.error('[TelegramAdapter] STT error:', err);
+        await this.sendMessage(
+          message.chat.id.toString(),
+          'Failed to transcribe voice message. Please try sending text.'
+        );
+        return;
+      }
+    }
+
+    if (!text) return;
 
     const channelMessage: ChannelMessage = {
       id: message.message_id.toString(),
       channel: 'telegram',
       from: message.from.username || message.from.first_name,
-      text: message.text,
-      timestamp: message.date * 1000, // Convert to milliseconds
+      text,
+      timestamp: message.date * 1000,
       metadata: {
         chatId: message.chat.id,
         userId: message.from.id,
         chatType: message.chat.type,
         firstName: message.from.first_name,
         lastName: message.from.last_name,
+        isVoice: !!voiceFile,
       },
     };
 
-    console.log('[TelegramAdapter] Message from', channelMessage.from, ':', channelMessage.text);
+    console.log('[TelegramAdapter] Message from', channelMessage.from, ':', channelMessage.text.slice(0, 80));
 
     try {
       const response = await this.handler(channelMessage);
@@ -204,11 +265,52 @@ export class TelegramAdapter implements ChannelAdapter {
     } catch (error) {
       console.error('[TelegramAdapter] Error handling message:', error);
 
-      // Send error message back to user
       await this.sendMessage(
         message.chat.id.toString(),
         'Sorry, I encountered an error processing your message.'
       );
     }
   }
+
+  private async downloadFile(fileId: string): Promise<Buffer> {
+    // Step 1: Get file path from Telegram
+    const fileResp = await fetch(`${this.baseUrl}/getFile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: fileId }),
+    });
+    const fileData = await fileResp.json();
+
+    if (!fileData.ok) {
+      throw new Error(`Failed to get file info: ${fileData.description}`);
+    }
+
+    // Step 2: Download the actual file
+    const filePath = fileData.result.file_path;
+    const downloadUrl = `https://api.telegram.org/file/bot${this.token}/${filePath}`;
+    const downloadResp = await fetch(downloadUrl);
+
+    if (!downloadResp.ok) {
+      throw new Error(`Failed to download file: ${downloadResp.status}`);
+    }
+
+    return Buffer.from(await downloadResp.arrayBuffer());
+  }
+}
+
+function splitText(text: string, maxLength: number): string[] {
+  if (text.length <= maxLength) return [text];
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLength) {
+      chunks.push(remaining);
+      break;
+    }
+    let splitIdx = remaining.lastIndexOf('\n', maxLength);
+    if (splitIdx < maxLength / 2) splitIdx = maxLength;
+    chunks.push(remaining.slice(0, splitIdx));
+    remaining = remaining.slice(splitIdx);
+  }
+  return chunks;
 }

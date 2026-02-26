@@ -1,45 +1,56 @@
 /**
- * EmailSync - Syncs email messages (STUB)
+ * EmailSync — Gmail Observer
  *
- * TODO: Integrate with email APIs:
- * - Gmail API
- * - Microsoft Graph API (Outlook/Office 365)
- * - IMAP for generic email providers
+ * Polls Gmail API every 60s for unread messages.
+ * Tracks seen message IDs to avoid re-emitting.
+ * Fetches detail (subject, from, snippet) for new messages.
+ * Graceful: if no Google tokens, logs warning and stays no-op.
  */
 
-import type { Observer, ObserverEvent, ObserverEventHandler } from './index';
+import type { Observer, ObserverEventHandler } from './index';
+import type { GoogleAuth } from '../integrations/google-auth.ts';
+import { listUnreadEmails, getEmailDetail } from '../integrations/google-api.ts';
+
+const POLL_INTERVAL_MS = 60_000; // 60 seconds
 
 export class EmailSync implements Observer {
   name = 'email';
   private running = false;
   private handler: ObserverEventHandler | null = null;
+  private pollTimer: Timer | null = null;
+  private googleAuth: GoogleAuth | null;
+  private seenMessageIds: Set<string> = new Set();
+
+  constructor(googleAuth?: GoogleAuth) {
+    this.googleAuth = googleAuth ?? null;
+  }
 
   async start(): Promise<void> {
-    // TODO: Gmail API integration
-    //   1. Set up OAuth2 credentials
-    //   2. Use Gmail API v1
-    //   3. Subscribe to push notifications or poll for new messages
-    //   4. Emit events for: new_email, email_read, email_sent, email_deleted
-    //
-    // TODO: Microsoft Graph API integration
-    //   1. Set up Azure AD app registration
-    //   2. Use Microsoft Graph Mail API
-    //   3. Subscribe to change notifications (webhooks)
-    //   4. Sync emails and emit observations
-    //
-    // TODO: IMAP integration for generic email providers
-    //   1. Use IMAP protocol for any email provider
-    //   2. Listen for new messages using IDLE command
-    //   3. Parse email headers and body
-    //   4. Emit structured email observations
-
     this.running = true;
-    console.log('[email] Observer started (stub - configure email provider API)');
-    console.log('[email] TODO: Set up OAuth2/IMAP and configure email provider');
+
+    if (!this.googleAuth || !this.googleAuth.isAuthenticated()) {
+      console.log('[email] No Google auth configured — email monitoring disabled');
+      console.log('[email] Run: bun run src/scripts/google-setup.ts to set up Gmail');
+      return;
+    }
+
+    console.log('[email] Observer started — polling Gmail every 60s');
+
+    // Initial poll
+    this.poll();
+
+    // Set up recurring poll
+    this.pollTimer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
   }
 
   async stop(): Promise<void> {
     this.running = false;
+
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+
     console.log('[email] Observer stopped');
   }
 
@@ -51,52 +62,48 @@ export class EmailSync implements Observer {
     this.handler = handler;
   }
 
-  // Example of what the implementation might look like (not functional):
-  //
-  // private async syncGmail(): Promise<void> {
-  //   const oauth2Client = new google.auth.OAuth2(
-  //     process.env.GOOGLE_CLIENT_ID,
-  //     process.env.GOOGLE_CLIENT_SECRET,
-  //     process.env.GOOGLE_REDIRECT_URI
-  //   );
-  //
-  //   oauth2Client.setCredentials({
-  //     refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
-  //   });
-  //
-  //   const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-  //
-  //   const response = await gmail.users.messages.list({
-  //     userId: 'me',
-  //     q: 'is:unread',
-  //     maxResults: 10,
-  //   });
-  //
-  //   for (const message of response.data.messages || []) {
-  //     const detail = await gmail.users.messages.get({
-  //       userId: 'me',
-  //       id: message.id!,
-  //     });
-  //
-  //     if (this.handler) {
-  //       this.handler({
-  //         type: 'new_email',
-  //         data: {
-  //           id: detail.data.id,
-  //           threadId: detail.data.threadId,
-  //           subject: this.getHeader(detail.data, 'Subject'),
-  //           from: this.getHeader(detail.data, 'From'),
-  //           to: this.getHeader(detail.data, 'To'),
-  //           date: this.getHeader(detail.data, 'Date'),
-  //           snippet: detail.data.snippet,
-  //         },
-  //         timestamp: Date.now(),
-  //       });
-  //     }
-  //   }
-  // }
-  //
-  // private getHeader(message: any, name: string): string | undefined {
-  //   return message.payload?.headers?.find((h: any) => h.name === name)?.value;
-  // }
+  private async poll(): Promise<void> {
+    if (!this.googleAuth || !this.handler) return;
+
+    try {
+      const accessToken = await this.googleAuth.getAccessToken();
+      const messages = await listUnreadEmails(accessToken, 10);
+
+      for (const msg of messages) {
+        // Skip already-seen messages
+        if (this.seenMessageIds.has(msg.id)) continue;
+        this.seenMessageIds.add(msg.id);
+
+        // Fetch detail
+        try {
+          const detail = await getEmailDetail(accessToken, msg.id);
+
+          this.handler({
+            type: 'email',
+            data: {
+              id: detail.id,
+              threadId: detail.threadId,
+              subject: detail.subject,
+              from: detail.from,
+              to: detail.to,
+              date: detail.date,
+              snippet: detail.snippet,
+              labels: detail.labels,
+            },
+            timestamp: Date.now(),
+          });
+        } catch (err) {
+          console.error(`[email] Failed to get detail for ${msg.id}:`, err);
+        }
+      }
+
+      // Cap seenMessageIds to prevent unbounded growth
+      if (this.seenMessageIds.size > 1000) {
+        const arr = Array.from(this.seenMessageIds);
+        this.seenMessageIds = new Set(arr.slice(arr.length - 500));
+      }
+    } catch (err) {
+      console.error('[email] Poll error:', err);
+    }
+  }
 }
