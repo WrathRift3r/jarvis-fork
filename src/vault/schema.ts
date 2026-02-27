@@ -335,4 +335,65 @@ function createTables(db: Database): void {
   `);
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_attachments_content ON content_attachments(content_id)`);
+
+  // Authority: Approval requests
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS approval_requests (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      agent_name TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      tool_arguments TEXT NOT NULL,
+      action_category TEXT NOT NULL,
+      urgency TEXT NOT NULL DEFAULT 'normal'
+        CHECK(urgency IN ('urgent', 'normal')),
+      reason TEXT NOT NULL,
+      context TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'approved', 'denied', 'expired', 'executed')),
+      decided_at INTEGER,
+      decided_by TEXT,
+      executed_at INTEGER,
+      execution_result TEXT,
+      created_at INTEGER NOT NULL
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_approval_status ON approval_requests(status)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_approval_agent ON approval_requests(agent_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_approval_category ON approval_requests(action_category)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_approval_created ON approval_requests(created_at)`);
+
+  // Authority: Audit trail
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS audit_trail (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      agent_name TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      action_category TEXT NOT NULL,
+      authority_decision TEXT NOT NULL
+        CHECK(authority_decision IN ('allowed', 'denied', 'approval_required')),
+      approval_id TEXT,
+      executed INTEGER NOT NULL DEFAULT 0,
+      execution_time_ms INTEGER,
+      created_at INTEGER NOT NULL,
+      CHECK(executed IN (0, 1))
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_trail(agent_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_category ON audit_trail(action_category)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_trail(created_at)`);
+
+  // Authority: Approval patterns (for learning)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS approval_patterns (
+      id TEXT PRIMARY KEY,
+      action_category TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      consecutive_approvals INTEGER NOT NULL DEFAULT 0,
+      last_approval_at INTEGER NOT NULL,
+      suggestion_sent INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(action_category, tool_name)
+    )
+  `);
 }

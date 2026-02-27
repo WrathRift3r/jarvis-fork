@@ -6,6 +6,12 @@ import { AgentInstance } from './agent.ts';
 import { AgentHierarchy } from './hierarchy.ts';
 import { ToolRegistry, type ToolDefinition, isToolResult } from '../actions/tools/registry.ts';
 import { toolDefToLLMTool } from '../actions/tools/builtin.ts';
+import type { ActionCategory } from '../roles/authority.ts';
+import type { AuthorityEngine } from '../authority/engine.ts';
+import type { ApprovalManager, ApprovalRequest } from '../authority/approval.ts';
+import type { AuditTrail } from '../authority/audit.ts';
+import type { EmergencyController } from '../authority/emergency.ts';
+import { getActionForTool } from '../authority/tool-action-map.ts';
 
 const MAX_TOOL_ITERATIONS = 25;
 const MAX_TOOL_RESULT_CHARS = 6000; // Cap individual tool results to control context size
@@ -14,6 +20,14 @@ export class AgentOrchestrator {
   private hierarchy: AgentHierarchy;
   private llmManager: LLMManager | null;
   private toolRegistry: ToolRegistry | null;
+
+  // Authority engine components
+  private authorityEngine: AuthorityEngine | null = null;
+  private approvalManager: ApprovalManager | null = null;
+  private auditTrail: AuditTrail | null = null;
+  private emergencyController: EmergencyController | null = null;
+  private temporaryGrants: Map<string, ActionCategory[]> = new Map();
+  private onApprovalNeeded: ((request: ApprovalRequest) => void) | null = null;
 
   constructor() {
     this.hierarchy = new AgentHierarchy();
@@ -35,6 +49,56 @@ export class AgentOrchestrator {
 
   getToolRegistry(): ToolRegistry | null {
     return this.toolRegistry;
+  }
+
+  // --- Authority setters ---
+
+  setAuthorityEngine(engine: AuthorityEngine): void {
+    this.authorityEngine = engine;
+  }
+
+  setApprovalManager(manager: ApprovalManager): void {
+    this.approvalManager = manager;
+  }
+
+  setAuditTrail(trail: AuditTrail): void {
+    this.auditTrail = trail;
+  }
+
+  setEmergencyController(controller: EmergencyController): void {
+    this.emergencyController = controller;
+  }
+
+  setApprovalCallback(cb: (request: ApprovalRequest) => void): void {
+    this.onApprovalNeeded = cb;
+  }
+
+  /**
+   * Grant a temporary permission to a specific agent (for parent escalation).
+   */
+  grantTemporary(agentId: string, action: ActionCategory): void {
+    const existing = this.temporaryGrants.get(agentId) ?? [];
+    if (!existing.includes(action)) {
+      existing.push(action);
+      this.temporaryGrants.set(agentId, existing);
+    }
+  }
+
+  /**
+   * Revoke a temporary permission from an agent.
+   */
+  revokeTemporary(agentId: string, action: ActionCategory): void {
+    const existing = this.temporaryGrants.get(agentId);
+    if (existing) {
+      this.temporaryGrants.set(agentId, existing.filter(a => a !== action));
+    }
+  }
+
+  /**
+   * Clear all temporary grants for an agent (called when task completes).
+   */
+  clearTemporaryGrants(agentId: string): void {
+    this.temporaryGrants.delete(agentId);
   }
 
   /**
@@ -384,6 +448,7 @@ export class AgentOrchestrator {
 
   /**
    * Execute a single tool call via the ToolRegistry.
+   * Includes authority gate: checks emergency state, authority level, and governed categories.
    * Returns a string for text-only results, or ContentBlock[] for multi-modal results (images).
    */
   private async executeTool(toolCall: LLMToolCall): Promise<string | ContentBlock[]> {
@@ -391,8 +456,84 @@ export class AgentOrchestrator {
       return `Error: No tool registry configured`;
     }
 
+    // --- Authority Gate ---
+
+    // 1. Emergency check
+    if (this.emergencyController && !this.emergencyController.canExecute()) {
+      const state = this.emergencyController.getState();
+      return `[SYSTEM ${state.toUpperCase()}] All tool execution is currently suspended. The user has ${state} the system.`;
+    }
+
+    // 2. Authority check
+    const primary = this.getPrimary();
+    if (this.authorityEngine && primary) {
+      const tool = this.toolRegistry.get(toolCall.name);
+      const actionCategory = getActionForTool(toolCall.name, tool?.category ?? 'unknown');
+
+      const decision = this.authorityEngine.checkAuthority({
+        agentId: primary.id,
+        agentAuthorityLevel: primary.agent.authority.max_authority_level,
+        agentRoleId: primary.agent.role.id,
+        toolName: toolCall.name,
+        toolCategory: tool?.category ?? 'unknown',
+        actionCategory,
+        temporaryGrants: this.temporaryGrants,
+      });
+
+      // Determine decision type for audit
+      const decisionType = decision.allowed
+        ? (decision.requiresApproval ? 'approval_required' as const : 'allowed' as const)
+        : 'denied' as const;
+
+      // 3. Log to audit trail
+      this.auditTrail?.log({
+        agent_id: primary.id,
+        agent_name: primary.agent.role.name,
+        tool_name: toolCall.name,
+        action_category: actionCategory,
+        authority_decision: decisionType,
+        approval_id: null,
+        executed: decision.allowed && !decision.requiresApproval,
+        execution_time_ms: null,
+      });
+
+      // 4. Denied
+      if (!decision.allowed) {
+        return `[AUTHORITY DENIED] Cannot execute ${toolCall.name}: ${decision.reason}. Your authority level is insufficient for ${actionCategory} actions.`;
+      }
+
+      // 5. Requires approval
+      if (decision.requiresApproval && this.approvalManager) {
+        const urgency = this.determineUrgency(actionCategory);
+        const request = this.approvalManager.createRequest({
+          agentId: primary.id,
+          agentName: primary.agent.role.name,
+          toolName: toolCall.name,
+          toolArguments: toolCall.arguments,
+          actionCategory,
+          urgency,
+          reason: decision.reason,
+          context: `Agent attempted: ${toolCall.name}(${JSON.stringify(toolCall.arguments).slice(0, 200)})`,
+        });
+
+        // Emit approval request event
+        this.onApprovalNeeded?.(request);
+
+        return `[AWAITING_APPROVAL] Request #${request.id.slice(0, 8)} submitted. ` +
+               `Action: ${toolCall.name} (${actionCategory}). ` +
+               `Reason: ${decision.reason}. ` +
+               `The user will be notified and can approve or deny this action.`;
+      }
+    }
+
+    // --- Normal execution ---
     try {
+      const startTime = Date.now();
       const raw = await this.toolRegistry.execute(toolCall.name, toolCall.arguments);
+      const executionTimeMs = Date.now() - startTime;
+
+      // Update audit entry with execution time (for allowed actions)
+      // We already logged above; for simplicity we log execution separately if needed
 
       // Multi-modal result (e.g. screenshot with image data)
       if (isToolResult(raw)) {
@@ -411,5 +552,14 @@ export class AgentOrchestrator {
     } catch (err) {
       return `Error executing ${toolCall.name}: ${err instanceof Error ? err.message : String(err)}`;
     }
+  }
+
+  /**
+   * Determine urgency for an approval request based on action category.
+   */
+  private determineUrgency(actionCategory: ActionCategory): 'urgent' | 'normal' {
+    // Financial actions are always urgent
+    if (actionCategory === 'make_payment') return 'urgent';
+    return 'normal';
   }
 }

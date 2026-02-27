@@ -19,6 +19,8 @@ import { DiscordAdapter } from '../comms/channels/discord.ts';
 import { createSTTProvider } from '../comms/voice.ts';
 import { getOrCreateConversation, addMessage } from '../vault/conversations.ts';
 
+export type ApprovalCommandHandler = (action: 'approve' | 'deny', shortId: string, channel: string) => Promise<string>;
+
 export class ChannelService implements Service {
   name = 'channels';
   private _status: ServiceStatus = 'stopped';
@@ -28,11 +30,17 @@ export class ChannelService implements Service {
   private sttProvider: STTProvider | null = null;
   /** Track last message sender per channel for proactive broadcasts */
   private lastRecipients = new Map<string, string>();
+  /** Handler for approval commands (approve/deny) from external channels */
+  private approvalHandler: ApprovalCommandHandler | null = null;
 
   constructor(config: JarvisConfig, agentService: AgentService) {
     this.config = config;
     this.agentService = agentService;
     this.manager = new ChannelManager();
+  }
+
+  setApprovalHandler(handler: ApprovalCommandHandler): void {
+    this.approvalHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -162,6 +170,21 @@ export class ChannelService implements Service {
     // Track recipient for future broadcasts
     const recipientId = String(msg.metadata.chatId ?? msg.metadata.channelId ?? msg.from);
     this.lastRecipients.set(channelTag, recipientId);
+
+    // Check for approval commands: "approve <id>" or "deny <id>"
+    const trimmed = msg.text.trim().toLowerCase();
+    const approveMatch = trimmed.match(/^approve\s+([a-f0-9-]+)/i);
+    const denyMatch = trimmed.match(/^deny\s+([a-f0-9-]+)/i);
+
+    if (this.approvalHandler && (approveMatch || denyMatch)) {
+      const action = approveMatch ? 'approve' : 'deny';
+      const shortId = (approveMatch ?? denyMatch)![1];
+      try {
+        return await this.approvalHandler(action as 'approve' | 'deny', shortId, channelTag);
+      } catch (err) {
+        return `Error processing approval: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
 
     // 1. Persist inbound user message to vault
     const conversation = getOrCreateConversation(channelTag);

@@ -9,6 +9,7 @@ export type PromptContext = {
   knowledgeContext?: string;
   availableSpecialists?: string;
   contentPipeline?: string[];
+  authorityRules?: string;
 };
 
 /**
@@ -105,6 +106,17 @@ export function buildSystemPrompt(role: RoleDefinition, context?: PromptContext)
   sections.push(`Your authority level is ${role.authority_level}/10.`);
   sections.push('This determines which actions you can perform autonomously.');
   sections.push('');
+
+  // Authority Rules (from engine)
+  if (context?.authorityRules) {
+    sections.push('# Authority Rules');
+    sections.push('The following rules govern your tool execution:');
+    sections.push(context.authorityRules);
+    sections.push('');
+    sections.push('When a tool returns [AWAITING_APPROVAL], tell the user you have submitted the request and are waiting for their approval.');
+    sections.push('When a tool returns [AUTHORITY DENIED], explain that you lack permission and suggest alternatives.');
+    sections.push('');
+  }
 
   // Current Context
   if (context) {

@@ -12,6 +12,11 @@ import type { LLMManager } from '../llm/manager.ts';
 import type { LLMMessage, LLMResponse, LLMToolCall, LLMTool } from '../llm/provider.ts';
 import { ToolRegistry } from '../actions/tools/registry.ts';
 import { toolDefToLLMTool, BUILTIN_TOOLS } from '../actions/tools/builtin.ts';
+import type { ActionCategory } from '../roles/authority.ts';
+import type { AuthorityEngine } from '../authority/engine.ts';
+import type { AuditTrail } from '../authority/audit.ts';
+import type { EmergencyController } from '../authority/emergency.ts';
+import { getActionForTool } from '../authority/tool-action-map.ts';
 
 const MAX_TOOL_ITERATIONS = 15; // Lower than primary's 25 — sub-agents should be focused
 const MAX_TOOL_RESULT_CHARS = 6000;
@@ -38,6 +43,11 @@ export type RunSubAgentOptions = {
   toolRegistry: ToolRegistry;
   onProgress?: ProgressCallback;
   maxIterations?: number;
+  // Authority engine components (optional — if not provided, no gate applied)
+  authorityEngine?: AuthorityEngine;
+  auditTrail?: AuditTrail;
+  emergencyController?: EmergencyController;
+  temporaryGrants?: Map<string, ActionCategory[]>;
 };
 
 /**
@@ -78,8 +88,60 @@ function getLLMTools(registry: ToolRegistry): LLMTool[] | undefined {
 
 /**
  * Execute a single tool call via a ToolRegistry.
+ * Includes optional authority gate for sub-agents.
  */
-async function executeTool(registry: ToolRegistry, toolCall: LLMToolCall): Promise<string> {
+async function executeTool(
+  registry: ToolRegistry,
+  toolCall: LLMToolCall,
+  authorityCtx?: {
+    agent: AgentInstance;
+    engine: AuthorityEngine;
+    auditTrail?: AuditTrail;
+    emergencyController?: EmergencyController;
+    temporaryGrants?: Map<string, ActionCategory[]>;
+  }
+): Promise<string> {
+  // Authority gate (if engine provided)
+  if (authorityCtx) {
+    const { agent, engine, auditTrail, emergencyController, temporaryGrants } = authorityCtx;
+
+    // Emergency check
+    if (emergencyController && !emergencyController.canExecute()) {
+      return `[SYSTEM ${emergencyController.getState().toUpperCase()}] Tool execution suspended.`;
+    }
+
+    const tool = registry.get(toolCall.name);
+    const actionCategory = getActionForTool(toolCall.name, tool?.category ?? 'unknown');
+
+    const decision = engine.checkAuthority({
+      agentId: agent.id,
+      agentAuthorityLevel: agent.agent.authority.max_authority_level,
+      agentRoleId: agent.agent.role.id,
+      toolName: toolCall.name,
+      toolCategory: tool?.category ?? 'unknown',
+      actionCategory,
+      temporaryGrants: temporaryGrants ?? new Map(),
+    });
+
+    auditTrail?.log({
+      agent_id: agent.id,
+      agent_name: agent.agent.role.name,
+      tool_name: toolCall.name,
+      action_category: actionCategory,
+      authority_decision: decision.allowed ? 'allowed' : 'denied',
+      executed: decision.allowed,
+    });
+
+    if (!decision.allowed) {
+      return `[AUTHORITY DENIED] ${toolCall.name}: ${decision.reason}`;
+    }
+
+    // Sub-agents don't get approval flow — they're denied outright for governed actions
+    if (decision.requiresApproval) {
+      return `[AUTHORITY DENIED] ${toolCall.name} requires user approval. Sub-agents cannot request approvals directly.`;
+    }
+  }
+
   try {
     let result = await registry.execute(toolCall.name, toolCall.arguments);
     result = typeof result === 'string' ? result : JSON.stringify(result);
@@ -110,7 +172,20 @@ export async function runSubAgent(opts: RunSubAgentOptions): Promise<SubAgentRes
     toolRegistry,
     onProgress,
     maxIterations = MAX_TOOL_ITERATIONS,
+    authorityEngine,
+    auditTrail,
+    emergencyController,
+    temporaryGrants,
   } = opts;
+
+  // Build authority context if engine provided
+  const authorityCtx = authorityEngine ? {
+    agent,
+    engine: authorityEngine,
+    auditTrail,
+    emergencyController,
+    temporaryGrants,
+  } : undefined;
 
   const agentName = agent.agent.role.name;
   const agentId = agent.id;
@@ -171,7 +246,7 @@ export async function runSubAgent(opts: RunSubAgentOptions): Promise<SubAgentRes
             });
           }
 
-          const result = await executeTool(toolRegistry, tc);
+          const result = await executeTool(toolRegistry, tc, authorityCtx);
           messages.push({
             role: 'tool',
             content: result,

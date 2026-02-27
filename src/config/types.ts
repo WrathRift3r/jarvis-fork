@@ -54,6 +54,34 @@ export type DesktopConfig = {
   snapshot_max_elements: number;
 };
 
+export type PerActionOverride = {
+  action: string;            // ActionCategory
+  role_id?: string;
+  allowed: boolean;
+  requires_approval?: boolean;
+};
+
+export type ContextRule = {
+  id: string;
+  action: string;            // ActionCategory
+  condition: 'time_range' | 'tool_name' | 'always';
+  params: Record<string, unknown>;
+  effect: 'allow' | 'deny' | 'require_approval';
+  description: string;
+};
+
+export type AuthorityConfig = {
+  default_level: number;
+  governed_categories: string[];       // ActionCategory[]
+  overrides: PerActionOverride[];
+  context_rules: ContextRule[];
+  learning: {
+    enabled: boolean;
+    suggest_threshold: number;
+  };
+  emergency_state: 'normal' | 'paused' | 'killed';
+};
+
 export type JarvisConfig = {
   daemon: {
     port: number;
@@ -75,9 +103,7 @@ export type JarvisConfig = {
   personality: {
     core_traits: string[];
   };
-  authority: {
-    default_level: number;
-  };
+  authority: AuthorityConfig;
   heartbeat: HeartbeatConfig;
   active_role: string;  // role file name
 };
@@ -136,6 +162,14 @@ export const DEFAULT_CONFIG: JarvisConfig = {
   },
   authority: {
     default_level: 3,
+    governed_categories: ['send_email', 'send_message', 'make_payment'],
+    overrides: [],
+    context_rules: [],
+    learning: {
+      enabled: true,
+      suggest_threshold: 5,
+    },
+    emergency_state: 'normal',
   },
   heartbeat: {
     interval_minutes: 15,

@@ -13,6 +13,8 @@ import type { ChannelService } from './channel-service.ts';
 import type { Commitment } from '../vault/commitments.ts';
 import type { ContentItem } from '../vault/content-pipeline.ts';
 import type { STTProvider, TTSProvider } from '../comms/voice.ts';
+import type { ApprovalRequest } from '../authority/approval.ts';
+import type { EmergencyState } from '../authority/emergency.ts';
 import { createCommitment, updateCommitmentStatus, updateCommitmentAssignee } from '../vault/commitments.ts';
 import { WebSocketServer, type WSMessage } from '../comms/websocket.ts';
 import { StreamRelay } from '../comms/streaming.ts';
@@ -252,6 +254,64 @@ export class WebSocketService implements Service {
       payload: {
         ...event,
         source: 'sub-agent',
+      },
+      timestamp: Date.now(),
+    };
+    this.wsServer.broadcast(message);
+  }
+
+  /**
+   * Broadcast an approval request to all connected dashboard clients.
+   * Always pushed via WS; urgent requests are also sent to external channels.
+   */
+  broadcastApprovalRequest(request: ApprovalRequest): void {
+    const shortId = request.id.slice(0, 8);
+    const message: WSMessage = {
+      type: 'notification',
+      payload: {
+        source: 'approval_request',
+        request,
+        shortId,
+      },
+      priority: request.urgency === 'urgent' ? 'urgent' : 'normal',
+      timestamp: Date.now(),
+    };
+    this.wsServer.broadcast(message);
+
+    // Push urgent approvals to external channels
+    if (request.urgency === 'urgent' && this.channelService) {
+      const text = `[APPROVAL NEEDED] ${request.agent_name} wants to run ${request.tool_name} (${request.action_category}).\nReason: ${request.reason}\nReply: approve ${shortId} / deny ${shortId}`;
+      this.channelService.broadcastToAll(text).catch(err =>
+        console.error('[WSService] Approval channel broadcast error:', err)
+      );
+    }
+  }
+
+  /**
+   * Broadcast emergency state changes to all connected clients.
+   */
+  broadcastEmergencyState(state: EmergencyState): void {
+    const message: WSMessage = {
+      type: 'notification',
+      payload: {
+        source: 'emergency_state',
+        state,
+      },
+      priority: 'urgent',
+      timestamp: Date.now(),
+    };
+    this.wsServer.broadcast(message);
+  }
+
+  /**
+   * Broadcast an approval resolution (approved/denied/executed) to all clients.
+   */
+  broadcastApprovalUpdate(request: ApprovalRequest): void {
+    const message: WSMessage = {
+      type: 'notification',
+      payload: {
+        source: 'approval_update',
+        request,
       },
       timestamp: Date.now(),
     };

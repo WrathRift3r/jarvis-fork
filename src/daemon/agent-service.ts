@@ -49,6 +49,7 @@ import { extractAndStore } from '../vault/extractor.ts';
 import { getKnowledgeForMessage } from '../vault/retrieval.ts';
 import type { ResearchQueue } from './research-queue.ts';
 import type { IAgentService } from './agent-service-interface.ts';
+import type { AuthorityEngine } from '../authority/engine.ts';
 
 export class AgentService implements Service, IAgentService {
   name = 'agent';
@@ -64,6 +65,7 @@ export class AgentService implements Service, IAgentService {
   private delegationCallback: ((specialistName: string, task: string) => void) | null = null;
   private researchQueue: ResearchQueue | null = null;
   private taskManager: AgentTaskManager | null = null;
+  private authorityEngine: AuthorityEngine | null = null;
 
   constructor(config: JarvisConfig) {
     this.config = config;
@@ -92,6 +94,10 @@ export class AgentService implements Service, IAgentService {
    */
   setResearchQueue(queue: ResearchQueue): void {
     this.researchQueue = queue;
+  }
+
+  setAuthorityEngine(engine: AuthorityEngine): void {
+    this.authorityEngine = engine;
   }
 
   getOrchestrator(): AgentOrchestrator {
@@ -514,6 +520,18 @@ export class AgentService implements Service, IAgentService {
       }
     } catch (err) {
       console.error('[AgentService] Error loading observations:', err);
+    }
+
+    // Authority rules for the system prompt
+    if (this.authorityEngine && this.role) {
+      try {
+        context.authorityRules = this.authorityEngine.describeRulesForAgent(
+          this.role.authority_level,
+          this.role.id
+        );
+      } catch (err) {
+        console.error('[AgentService] Error building authority rules:', err);
+      }
     }
 
     return context;

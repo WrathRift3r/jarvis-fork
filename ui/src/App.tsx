@@ -12,13 +12,14 @@ const MemoryPage = React.lazy(() => import("./pages/MemoryPage"));
 const CalendarPage = React.lazy(() => import("./pages/CalendarPage"));
 const OfficePage = React.lazy(() => import("./pages/OfficePage"));
 const CommandPage = React.lazy(() => import("./pages/CommandPage"));
+const AuthorityPage = React.lazy(() => import("./pages/AuthorityPage"));
 const SettingsPage = React.lazy(() => import("./pages/SettingsPage"));
 
-type Route = "chat" | "tasks" | "pipeline" | "memory" | "calendar" | "office" | "knowledge" | "command" | "settings";
+type Route = "chat" | "tasks" | "pipeline" | "memory" | "calendar" | "office" | "knowledge" | "command" | "authority" | "settings";
 
 function getRoute(): Route {
   const hash = window.location.hash.replace("#/", "");
-  if (["chat", "tasks", "pipeline", "memory", "calendar", "office", "knowledge", "command", "settings"].includes(hash)) {
+  if (["chat", "tasks", "pipeline", "memory", "calendar", "office", "knowledge", "command", "authority", "settings"].includes(hash)) {
     return hash as Route;
   }
   return "chat";
@@ -118,6 +119,7 @@ export function App() {
           <NavItem icon={"\u25CB"} label="Office" route="office" active={route} onClick={navigate} />
           <NavItem icon={"\u25C7"} label="Knowledge" route="knowledge" active={route} onClick={navigate} />
           <NavItem icon={"\u25A3"} label="Command Center" route="command" active={route} onClick={navigate} />
+          <NavItem icon={"\u2666"} label="Authority" route="authority" active={route} onClick={navigate} />
           <NavItem icon={"\u2699"} label="Settings" route="settings" active={route} onClick={navigate} />
         </div>
 
@@ -152,6 +154,7 @@ export function App() {
           {route === "office" && <OfficePage agentActivity={ws.agentActivity} />}
           {route === "knowledge" && <KnowledgePage />}
           {route === "command" && <CommandPage />}
+          {route === "authority" && <AuthorityPage />}
           {route === "settings" && <SettingsPage />}
         </React.Suspense>
       </main>
