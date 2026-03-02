@@ -111,7 +111,7 @@ export function App() {
         </div>
 
         {/* Nav Links */}
-        <div style={{ flex: 1, padding: "12px 8px", display: "flex", flexDirection: "column", gap: "2px" }}>
+        <div style={{ flex: 1, minHeight: 0, padding: "12px 8px", display: "flex", flexDirection: "column", gap: "2px", overflowY: "auto" }}>
           <NavItem icon={"\u25C8"} label="Chat" route="chat" active={route} onClick={navigate} />
           <NavItem icon={"\u2726"} label="Tasks" route="tasks" active={route} onClick={navigate} />
           <NavItem icon={"\u25B6"} label="Pipeline" route="pipeline" active={route} onClick={navigate} />
@@ -164,7 +164,7 @@ function NavItem({ icon, label, route, active, onClick }: {
         display: "flex",
         alignItems: "center",
         gap: "10px",
-        padding: "10px 12px",
+        padding: "8px 12px",
         borderRadius: "6px",
         border: "none",
         background: isActive ? "rgba(0, 212, 255, 0.1)" : "transparent",
