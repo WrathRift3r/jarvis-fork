@@ -44,18 +44,19 @@ export class DiscordAdapter implements ChannelAdapter {
     });
 
     // Wait for ready event
+    let loginTimeout: ReturnType<typeof setTimeout> | null = null;
     const readyPromise = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Discord login timed out')), 30000);
+      loginTimeout = setTimeout(() => reject(new Error('Discord login timed out')), 30000);
 
       this.client!.once('ready', () => {
-        clearTimeout(timeout);
+        clearTimeout(loginTimeout!);
         this.connected = true;
         console.log(`[DiscordAdapter] Connected as: ${this.client!.user?.tag}`);
         resolve();
       });
 
       this.client!.once('error', (err) => {
-        clearTimeout(timeout);
+        clearTimeout(loginTimeout!);
         reject(err);
       });
     });
@@ -69,7 +70,15 @@ export class DiscordAdapter implements ChannelAdapter {
       }
     });
 
-    await this.client.login(this.token);
+    try {
+      await this.client.login(this.token);
+    } catch (err) {
+      // Clear the ready timeout to prevent unhandled rejection
+      if (loginTimeout) clearTimeout(loginTimeout);
+      this.client.destroy();
+      this.client = null;
+      throw err;
+    }
     await readyPromise;
   }
 
