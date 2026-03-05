@@ -180,7 +180,7 @@ export async function extractAndStore(
 
       if (existing.length > 0) {
         // Use existing entity ID
-        entityMap.set(name, existing[0].id);
+        entityMap.set(name, existing[0]!.id);
       } else {
         // Create new entity
         const entity = createEntity(
