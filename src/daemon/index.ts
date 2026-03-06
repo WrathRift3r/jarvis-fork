@@ -34,6 +34,7 @@ import { EmergencyController } from "../authority/emergency.ts";
 import { ApprovalDelivery } from "../authority/approval-delivery.ts";
 import { DeferredExecutor } from "../authority/deferred-executor.ts";
 import { sendDesktopNotification } from "../comms/desktop-notify.ts";
+import { SidecarManager } from "../sidecar/manager.ts";
 
 // Constants
 const DEFAULT_PORT = 3142;  // JARVIS port
@@ -298,11 +299,17 @@ export async function startDaemon(userConfig?: Partial<DaemonConfig>): Promise<v
       wsService.broadcastSubAgentProgress(event);
     });
 
+    // 6c. Create sidecar manager
+    const sidecarManager = new SidecarManager(jarvisConfig.daemon.data_dir.replace('~', os.homedir()));
+    const brainDomain = jarvisConfig.daemon.brain_domain ?? `localhost:${config.port}`;
+    sidecarManager.setBrainUrl(brainDomain);
+
     // 7. Register services in startup order
-    //    Agent first (needs DB), Observers second, Channels third, WebSocket last (needs Agent)
+    //    Agent first (needs DB), Observers second, Channels third, Sidecar, WebSocket last (needs Agent)
     registry.register(agentService);
     registry.register(observerService);
     registry.register(channelService);
+    registry.register(sidecarManager);
     registry.register(wsService);
 
     // 8. Start health monitor (before services, so API routes can reference it)
@@ -426,6 +433,7 @@ export async function startDaemon(userConfig?: Partial<DaemonConfig>): Promise<v
       deferredExecutor,
       awarenessService: null as any,
       goalService: undefined,
+      sidecarManager,
     };
     const apiRoutes = createApiRoutes(apiContext);
     wsService.setApiRoutes(apiRoutes);

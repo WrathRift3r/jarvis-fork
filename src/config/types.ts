@@ -124,6 +124,8 @@ export type JarvisConfig = {
     port: number;
     data_dir: string;
     db_path: string;
+    /** External domain for the brain (used in sidecar JWT tokens). Env: JARVIS_BRAIN_DOMAIN */
+    brain_domain?: string;
   };
   google?: GoogleConfig;
   channels?: ChannelConfig;

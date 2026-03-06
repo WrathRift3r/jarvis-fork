@@ -1,0 +1,307 @@
+/**
+ * Sidecar Manager
+ *
+ * Brain-side service that manages sidecar enrollment, authentication,
+ * and connection tracking. Handles ES256 key pair lifecycle and JWT signing.
+ */
+
+import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, importPKCS8, importSPKI, SignJWT, type JWK } from 'jose';
+import { existsSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
+import type { Service, ServiceStatus } from '../daemon/services.ts';
+import { getDb, generateId } from '../vault/schema.ts';
+import type {
+  SidecarRecord,
+  SidecarInfo,
+  SidecarTokenClaims,
+  ConnectedSidecar,
+} from './types.ts';
+
+const ALG = 'ES256';
+const KEY_DIR_NAME = 'sidecar-keys';
+const PRIVATE_KEY_FILE = 'private.pem';
+const PUBLIC_KEY_FILE = 'public.pem';
+
+export class SidecarManager implements Service {
+  readonly name = 'sidecar-manager';
+
+  private privateKey: CryptoKey | null = null;
+  private publicKey: CryptoKey | null = null;
+  private publicJwk: JWK | null = null;
+  private keyId: string = '';
+  private dataDir: string;
+  private brainUrl: string = '';
+  private _status: ServiceStatus = 'stopped';
+
+  /** Runtime map of connected sidecars (not persisted) */
+  private connected = new Map<string, ConnectedSidecar>();
+
+  constructor(dataDir: string) {
+    this.dataDir = dataDir;
+  }
+
+  /**
+   * Set the brain's external URL (used in JWT claims).
+   * Must be called before enrolling sidecars.
+   * Example: "shiny-panda.domain.com" or "localhost:3142"
+   */
+  setBrainUrl(url: string): void {
+    this.brainUrl = url;
+  }
+
+  // --------------- Service Interface ---------------
+
+  async start(): Promise<void> {
+    this._status = 'starting';
+    try {
+      await this.loadOrGenerateKeys();
+      this._status = 'running';
+      console.log('[SidecarManager] Started — keys loaded');
+    } catch (err) {
+      this._status = 'error';
+      throw err;
+    }
+  }
+
+  async stop(): Promise<void> {
+    this._status = 'stopping';
+    this.privateKey = null;
+    this.publicKey = null;
+    this.publicJwk = null;
+    this.connected.clear();
+    this._status = 'stopped';
+    console.log('[SidecarManager] Stopped');
+  }
+
+  status(): ServiceStatus {
+    return this._status;
+  }
+
+  // --------------- Key Management ---------------
+
+  private get keysDir(): string {
+    return path.join(this.dataDir, KEY_DIR_NAME);
+  }
+
+  private get privateKeyPath(): string {
+    return path.join(this.keysDir, PRIVATE_KEY_FILE);
+  }
+
+  private get publicKeyPath(): string {
+    return path.join(this.keysDir, PUBLIC_KEY_FILE);
+  }
+
+  private async loadOrGenerateKeys(): Promise<void> {
+    if (existsSync(this.privateKeyPath) && existsSync(this.publicKeyPath)) {
+      await this.loadKeys();
+      console.log('[SidecarManager] Loaded existing ES256 key pair');
+    } else {
+      await this.generateKeys();
+      console.log('[SidecarManager] Generated new ES256 key pair');
+    }
+
+    // Export public key as JWK for the JWKS endpoint
+    this.publicJwk = await exportJWK(this.publicKey!);
+    this.keyId = this.publicJwk.x ?? 'default'; // use x-coordinate as kid (stable, unique)
+  }
+
+  private async generateKeys(): Promise<void> {
+    mkdirSync(this.keysDir, { recursive: true });
+
+    const { privateKey, publicKey } = await generateKeyPair(ALG);
+    this.privateKey = privateKey;
+    this.publicKey = publicKey;
+
+    // Export to PEM and write to disk
+    const pkcs8 = await exportPKCS8(privateKey);
+    const spki = await exportSPKI(publicKey);
+
+    await Bun.write(this.privateKeyPath, pkcs8);
+    await Bun.write(this.publicKeyPath, spki);
+  }
+
+  private async loadKeys(): Promise<void> {
+    const privatePem = await Bun.file(this.privateKeyPath).text();
+    const publicPem = await Bun.file(this.publicKeyPath).text();
+
+    this.privateKey = await importPKCS8(privatePem, ALG);
+    this.publicKey = await importSPKI(publicPem, ALG);
+  }
+
+  // --------------- JWKS ---------------
+
+  /**
+   * Returns the JWKS (JSON Web Key Set) containing the brain's public key.
+   * Served at GET /api/sidecars/.well-known/jwks.json
+   */
+  getJwks(): { keys: JWK[] } {
+    if (!this.publicJwk) {
+      throw new Error('SidecarManager not started');
+    }
+    return {
+      keys: [
+        {
+          ...this.publicJwk,
+          alg: ALG,
+          use: 'sig',
+          kid: this.keyId,
+        },
+      ],
+    };
+  }
+
+  // --------------- Enrollment ---------------
+
+  /**
+   * Enroll a new sidecar. Returns the signed JWT enrollment token.
+   */
+  async enrollSidecar(name: string): Promise<{ token: string; sidecar: SidecarRecord }> {
+    if (!this.privateKey) throw new Error('SidecarManager not started');
+    if (!this.brainUrl) throw new Error('Brain URL not configured — call setBrainUrl() first');
+
+    // Validate name
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.length > 64) {
+      throw new Error('Sidecar name must be 1-64 characters');
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+      throw new Error('Sidecar name may only contain letters, numbers, hyphens, and underscores');
+    }
+
+    // Check uniqueness
+    const db = getDb();
+    const existing = db.query('SELECT id FROM sidecars WHERE name = ? AND status = ?').get(trimmed, 'enrolled') as { id: string } | null;
+    if (existing) {
+      throw new Error(`Sidecar "${trimmed}" is already enrolled`);
+    }
+
+    const id = generateId();
+    const tokenId = generateId();
+
+    // Determine protocol based on brain URL
+    const isSecure = !this.brainUrl.includes('localhost') && !this.brainUrl.match(/:\d+$/);
+    const wsProtocol = isSecure ? 'wss' : 'ws';
+    const httpProtocol = isSecure ? 'https' : 'http';
+
+    const brainWs = `${wsProtocol}://${this.brainUrl}/sidecar/connect`;
+    const jwksUrl = `${httpProtocol}://${this.brainUrl}/api/sidecars/.well-known/jwks.json`;
+
+    // Sign JWT
+    const token = await new SignJWT({
+      sid: id,
+      name: trimmed,
+      brain: brainWs,
+      jwks: jwksUrl,
+    } satisfies Omit<SidecarTokenClaims, 'sub' | 'jti' | 'iat'>)
+      .setProtectedHeader({ alg: ALG, kid: this.keyId })
+      .setSubject(`sidecar:${id}`)
+      .setJti(tokenId)
+      .setIssuedAt()
+      .sign(this.privateKey);
+
+    // Store in database
+    db.run(
+      'INSERT INTO sidecars (id, name, token_id) VALUES (?, ?, ?)',
+      [id, trimmed, tokenId],
+    );
+
+    const sidecar = db.query('SELECT * FROM sidecars WHERE id = ?').get(id) as SidecarRecord;
+    console.log(`[SidecarManager] Enrolled sidecar "${trimmed}" (${id})`);
+
+    return { token, sidecar };
+  }
+
+  // --------------- Registry (DB queries) ---------------
+
+  /** Get all enrolled sidecars with connection state */
+  listSidecars(): SidecarInfo[] {
+    const db = getDb();
+    const records = db.query('SELECT * FROM sidecars WHERE status = ? ORDER BY enrolled_at DESC').all('enrolled') as SidecarRecord[];
+    return records.map((r) => this.toSidecarInfo(r));
+  }
+
+  /** Get a single sidecar by ID */
+  getSidecar(id: string): SidecarInfo | null {
+    const db = getDb();
+    const record = db.query('SELECT * FROM sidecars WHERE id = ?').get(id) as SidecarRecord | null;
+    return record ? this.toSidecarInfo(record) : null;
+  }
+
+  /** Revoke a sidecar (soft delete). Disconnects if connected. */
+  revokeSidecar(id: string): boolean {
+    const db = getDb();
+    const result = db.run('UPDATE sidecars SET status = ? WHERE id = ? AND status = ?', ['revoked', id, 'enrolled']);
+    if (result.changes > 0) {
+      this.connected.delete(id);
+      console.log(`[SidecarManager] Revoked sidecar ${id}`);
+      return true;
+    }
+    return false;
+  }
+
+  /** Check if a sidecar ID is enrolled (not revoked) */
+  isEnrolled(id: string): boolean {
+    const db = getDb();
+    const row = db.query('SELECT id FROM sidecars WHERE id = ? AND status = ?').get(id, 'enrolled');
+    return row !== null;
+  }
+
+  /** Update last_seen_at for a sidecar */
+  touchSidecar(id: string): void {
+    const db = getDb();
+    db.run("UPDATE sidecars SET last_seen_at = datetime('now') WHERE id = ?", [id]);
+  }
+
+  // --------------- Connection Tracking ---------------
+
+  /** Register a connected sidecar (called after WS handshake + registration message) */
+  registerConnection(sidecar: ConnectedSidecar): void {
+    this.connected.set(sidecar.id, sidecar);
+    // Persist connection details to DB so they're available even when offline
+    const db = getDb();
+    db.run(
+      `UPDATE sidecars SET last_seen_at = datetime('now'), hostname = ?, os = ?, platform = ?, capabilities = ? WHERE id = ?`,
+      [sidecar.hostname, sidecar.os, sidecar.platform, JSON.stringify(sidecar.capabilities), sidecar.id],
+    );
+    console.log(`[SidecarManager] Sidecar connected: ${sidecar.name} (${sidecar.id})`);
+  }
+
+  /** Remove a connected sidecar (called on WS close) */
+  removeConnection(id: string): void {
+    const sc = this.connected.get(id);
+    this.connected.delete(id);
+    if (sc) {
+      console.log(`[SidecarManager] Sidecar disconnected: ${sc.name} (${id})`);
+    }
+  }
+
+  /** Get all currently connected sidecars */
+  getConnectedSidecars(): ConnectedSidecar[] {
+    return Array.from(this.connected.values());
+  }
+
+  /** Check if a specific sidecar is connected */
+  isConnected(id: string): boolean {
+    return this.connected.has(id);
+  }
+
+  // --------------- Helpers ---------------
+
+  private toSidecarInfo(record: SidecarRecord): SidecarInfo {
+    const conn = this.connected.get(record.id);
+    const parsedCapabilities = record.capabilities ? JSON.parse(record.capabilities) : undefined;
+    return {
+      id: record.id,
+      name: record.name,
+      enrolled_at: record.enrolled_at,
+      last_seen_at: record.last_seen_at,
+      status: record.status,
+      connected: !!conn,
+      hostname: conn?.hostname ?? record.hostname ?? undefined,
+      os: conn?.os ?? record.os ?? undefined,
+      platform: conn?.platform ?? record.platform ?? undefined,
+      capabilities: conn?.capabilities ?? parsedCapabilities,
+    };
+  }
+}
+

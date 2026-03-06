@@ -627,4 +627,23 @@ function createTables(db: Database): void {
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_gci_type ON goal_check_ins(type)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_gci_created ON goal_check_ins(created_at)`);
+
+  // Sidecars table: enrolled sidecar processes
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sidecars (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      token_id TEXT NOT NULL UNIQUE,
+      enrolled_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen_at TEXT,
+      status TEXT NOT NULL DEFAULT 'enrolled'
+        CHECK(status IN ('enrolled', 'revoked')),
+      hostname TEXT,
+      os TEXT,
+      platform TEXT,
+      capabilities TEXT
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sidecars_name ON sidecars(name)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sidecars_token_id ON sidecars(token_id)`);
 }

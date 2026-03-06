@@ -72,6 +72,7 @@ export type ApiContext = {
   nlBuilder?: import('../workflows/nl-builder.ts').NLWorkflowBuilder;
   autoSuggest?: import('../workflows/auto-suggest.ts').WorkflowAutoSuggest;
   goalService?: import('../goals/service.ts').GoalService;
+  sidecarManager?: import('../sidecar/manager.ts').SidecarManager;
 };
 
 // CORS headers for dashboard
@@ -1952,6 +1953,66 @@ export function createApiRoutes(ctx: ApiContext): Record<string, unknown> {
           const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
           const goals = require('../vault/goals.ts');
           return json(goals.getProgressHistory(id, limit));
+        } catch (err) { return error(`${err}`); }
+      },
+    },
+
+    // --- Sidecars ---
+    '/api/sidecars': {
+      GET: () => {
+        try {
+          if (!ctx.sidecarManager) return error('Sidecar manager not available', 503);
+          return json(ctx.sidecarManager.listSidecars());
+        } catch (err) { return error(`${err}`); }
+      },
+    },
+
+    '/api/sidecars/enroll': {
+      POST: async (req: Request) => {
+        try {
+          if (!ctx.sidecarManager) return error('Sidecar manager not available', 503);
+          const body = await req.json() as { name?: string };
+          if (!body.name) return error('Missing "name" field');
+          const result = await ctx.sidecarManager.enrollSidecar(body.name);
+          return json(result, 201);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes('already enrolled') || msg.includes('may only contain')) {
+            return error(msg, 409);
+          }
+          return error(msg);
+        }
+      },
+    },
+
+    '/api/sidecars/.well-known/jwks.json': {
+      GET: () => {
+        try {
+          if (!ctx.sidecarManager) return error('Sidecar manager not available', 503);
+          return json(ctx.sidecarManager.getJwks());
+        } catch (err) { return error(`${err}`); }
+      },
+    },
+
+    '/api/sidecars/:id': {
+      GET: (req: Request) => {
+        try {
+          if (!ctx.sidecarManager) return error('Sidecar manager not available', 503);
+          const url = new URL(req.url);
+          const id = url.pathname.split('/').pop()!;
+          const sidecar = ctx.sidecarManager.getSidecar(id);
+          if (!sidecar) return error('Sidecar not found', 404);
+          return json(sidecar);
+        } catch (err) { return error(`${err}`); }
+      },
+      DELETE: (req: Request) => {
+        try {
+          if (!ctx.sidecarManager) return error('Sidecar manager not available', 503);
+          const url = new URL(req.url);
+          const id = url.pathname.split('/').pop()!;
+          const revoked = ctx.sidecarManager.revokeSidecar(id);
+          if (!revoked) return error('Sidecar not found or already revoked', 404);
+          return json({ success: true });
         } catch (err) { return error(`${err}`); }
       },
     },

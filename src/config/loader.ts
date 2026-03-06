@@ -74,6 +74,10 @@ function applyEnvOverrides(config: JarvisConfig): void {
     if (!config.llm.ollama) config.llm.ollama = { base_url: '', model: 'llama3' };
     config.llm.ollama.base_url = env.JARVIS_OLLAMA_URL;
   }
+
+  if (env.JARVIS_BRAIN_DOMAIN) {
+    config.daemon.brain_domain = env.JARVIS_BRAIN_DOMAIN;
+  }
 }
 
 export async function loadConfig(configPath?: string): Promise<JarvisConfig> {

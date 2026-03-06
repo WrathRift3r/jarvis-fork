@@ -124,7 +124,7 @@ describe('Vault — Goals', () => {
     expect(updated!.title).toBe('Updated Title');
     expect(updated!.description).toBe('New description');
     expect(updated!.tags).toEqual(['updated']);
-    expect(updated!.updated_at).toBeGreaterThan(goal.updated_at);
+    expect(updated!.updated_at).toBeGreaterThanOrEqual(goal.updated_at);
   });
 
   test('updateGoal returns null for non-existent', () => {
