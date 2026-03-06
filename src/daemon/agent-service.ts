@@ -101,6 +101,7 @@ export class AgentService implements Service, IAgentService {
     this.authorityEngine = engine;
   }
 
+
   getOrchestrator(): AgentOrchestrator {
     return this.orchestrator;
   }

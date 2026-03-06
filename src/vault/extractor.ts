@@ -95,9 +95,7 @@ export function parseExtractionResponse(llmResponse: string): ExtractionResult {
     };
 
     return result;
-  } catch (error) {
-    console.error('Failed to parse extraction response:', error);
-    console.error('Response was:', llmResponse);
+  } catch (_error) {
 
     // Return empty result on parse failure
     return {

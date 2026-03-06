@@ -309,6 +309,22 @@ export class WebSocketService implements Service {
   /**
    * Broadcast an awareness event to all connected clients.
    */
+  /**
+   * Broadcast a sidecar event to all connected clients.
+   */
+  broadcastSidecarEvent(sidecarId: string, event: { type: string; data: Record<string, unknown>; timestamp: number }): void {
+    const message: WSMessage = {
+      type: 'notification',
+      payload: {
+        source: 'sidecar_event',
+        sidecarId,
+        event,
+      },
+      timestamp: event.timestamp,
+    };
+    this.wsServer.broadcast(message);
+  }
+
   broadcastAwarenessEvent(event: { type: string; data: Record<string, unknown>; timestamp: number }): void {
     const message: WSMessage = {
       type: 'notification',

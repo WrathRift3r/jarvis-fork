@@ -49,8 +49,8 @@ describe('createBrowserTools', () => {
     ]);
   });
 
-  test('BUILTIN_TOOLS = NON_BROWSER_TOOLS + 7 browser + 8 desktop tools', () => {
-    expect(BUILTIN_TOOLS).toHaveLength(NON_BROWSER_TOOLS.length + 7 + 8);
+  test('BUILTIN_TOOLS = NON_BROWSER_TOOLS + list_sidecars + 7 browser + 8 desktop tools', () => {
+    expect(BUILTIN_TOOLS).toHaveLength(NON_BROWSER_TOOLS.length + 1 + 7 + 8);
   });
 });
 

@@ -167,6 +167,27 @@ export function classifyEvent(event: ObserverEvent): ClassifiedEvent {
     return { event, priority: 'low', reason: `Screen captured (${Math.round((data.pixelChangePct as number) * 100)}% change)` };
   }
 
+  // --- Sidecar events ---
+  if (type === 'sidecar_register') {
+    return { event, priority: 'normal', reason: `Sidecar registered: ${data.name ?? data.sidecar_id}` };
+  }
+
+  if (type === 'sidecar_disconnect') {
+    return { event, priority: 'normal', reason: `Sidecar disconnected: ${data.name ?? data.sidecar_id}` };
+  }
+
+  if (type === 'sidecar_rpc_error') {
+    return { event, priority: 'high', reason: `Sidecar RPC error: ${data.error ?? data.method} on ${data.name ?? data.sidecar_id}` };
+  }
+
+  if (type === 'sidecar_rpc_complete') {
+    return { event, priority: 'low', reason: `Sidecar RPC complete: ${data.method} on ${data.name ?? data.sidecar_id}` };
+  }
+
+  if (type.startsWith('sidecar_')) {
+    return { event, priority: 'normal', reason: `Sidecar event: ${type}` };
+  }
+
   // --- Default ---
   return { event, priority: 'low', reason: `Unclassified event: ${type}` };
 }

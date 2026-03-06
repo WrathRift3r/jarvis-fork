@@ -11,6 +11,7 @@ import { TerminalExecutor } from '../terminal/executor.ts';
 import { BrowserController, type PageSnapshot } from '../browser/session.ts';
 import type { ToolDefinition, ToolResult } from './registry.ts';
 import type { LLMTool } from '../../llm/provider.ts';
+import { routeToSidecar } from './sidecar-route.ts';
 
 const terminal = new TerminalExecutor({ timeout: 30000 });
 
@@ -49,13 +50,18 @@ export function toolDefToLLMTool(tool: ToolDefinition): LLMTool {
 
 export const runCommandTool: ToolDefinition = {
   name: 'run_command',
-  description: 'Execute a shell command and return the output. Use this to run terminal commands, scripts, or system utilities.',
+  description: 'Execute a shell command and return the output. Use this to run terminal commands, scripts, or system utilities. Optionally specify a "target" sidecar name/ID to run the command on a remote machine instead of locally.',
   category: 'terminal',
   parameters: {
     command: {
       type: 'string',
       description: 'The shell command to execute',
       required: true,
+    },
+    target: {
+      type: 'string',
+      description: 'Sidecar name or ID to run on a remote machine (omit for local execution)',
+      required: false,
     },
     cwd: {
       type: 'string',
@@ -69,6 +75,15 @@ export const runCommandTool: ToolDefinition = {
     },
   },
   execute: async (params) => {
+    const target = params.target as string | undefined;
+    if (target) {
+      return routeToSidecar(target, 'run_command', {
+        command: params.command,
+        cwd: params.cwd,
+        timeout: params.timeout,
+      }, 'terminal');
+    }
+
     const command = params.command as string;
     const cwd = (params.cwd as string) || undefined;
     const timeout = (params.timeout as number) || undefined;
@@ -91,7 +106,7 @@ export const runCommandTool: ToolDefinition = {
 
 export const readFileTool: ToolDefinition = {
   name: 'read_file',
-  description: 'Read the contents of a file from disk. Returns the file content as text.',
+  description: 'Read the contents of a file from disk. Returns the file content as text. Optionally specify a "target" sidecar to read from a remote machine.',
   category: 'file-ops',
   parameters: {
     path: {
@@ -99,8 +114,18 @@ export const readFileTool: ToolDefinition = {
       description: 'The absolute or relative path to the file to read',
       required: true,
     },
+    target: {
+      type: 'string',
+      description: 'Sidecar name or ID to read from a remote machine (omit for local)',
+      required: false,
+    },
   },
   execute: async (params) => {
+    const target = params.target as string | undefined;
+    if (target) {
+      return routeToSidecar(target, 'read_file', { path: params.path }, 'filesystem');
+    }
+
     const filePath = resolve(params.path as string);
 
     if (!existsSync(filePath)) {
@@ -124,7 +149,7 @@ export const readFileTool: ToolDefinition = {
 
 export const writeFileTool: ToolDefinition = {
   name: 'write_file',
-  description: 'Write content to a file on disk. Creates the file if it does not exist, overwrites if it does.',
+  description: 'Write content to a file on disk. Creates the file if it does not exist, overwrites if it does. Optionally specify a "target" sidecar to write on a remote machine.',
   category: 'file-ops',
   parameters: {
     path: {
@@ -137,8 +162,18 @@ export const writeFileTool: ToolDefinition = {
       description: 'The content to write to the file',
       required: true,
     },
+    target: {
+      type: 'string',
+      description: 'Sidecar name or ID to write on a remote machine (omit for local)',
+      required: false,
+    },
   },
   execute: async (params) => {
+    const target = params.target as string | undefined;
+    if (target) {
+      return routeToSidecar(target, 'write_file', { path: params.path, content: params.content }, 'filesystem');
+    }
+
     const filePath = resolve(params.path as string);
     const content = params.content as string;
 
@@ -149,7 +184,7 @@ export const writeFileTool: ToolDefinition = {
 
 export const listDirectoryTool: ToolDefinition = {
   name: 'list_directory',
-  description: 'List the contents of a directory. Returns file and folder names with their types and sizes.',
+  description: 'List the contents of a directory. Returns file and folder names with their types and sizes. Optionally specify a "target" sidecar to list on a remote machine.',
   category: 'file-ops',
   parameters: {
     path: {
@@ -157,8 +192,18 @@ export const listDirectoryTool: ToolDefinition = {
       description: 'The absolute or relative path to the directory to list',
       required: true,
     },
+    target: {
+      type: 'string',
+      description: 'Sidecar name or ID to list on a remote machine (omit for local)',
+      required: false,
+    },
   },
   execute: async (params) => {
+    const target = params.target as string | undefined;
+    if (target) {
+      return routeToSidecar(target, 'list_directory', { path: params.path }, 'filesystem');
+    }
+
     const dirPath = resolve(params.path as string);
 
     if (!existsSync(dirPath)) {
@@ -409,12 +454,14 @@ export const NON_BROWSER_TOOLS: ToolDefinition[] = [
 ];
 
 import { DESKTOP_TOOLS } from './desktop.ts';
+import { listSidecarsTool } from './sidecar-list.ts';
 
 /**
  * All built-in tools.
  */
 export const BUILTIN_TOOLS: ToolDefinition[] = [
   ...NON_BROWSER_TOOLS,
+  listSidecarsTool,
   browserNavigateTool,
   browserSnapshotTool,
   browserClickTool,

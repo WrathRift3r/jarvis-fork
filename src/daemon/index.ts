@@ -810,6 +810,40 @@ export async function startDaemon(userConfig?: Partial<DaemonConfig>): Promise<v
       }
     }
 
+    // 10g. Inject sidecar manager into tool routing layer
+    {
+      const { setSidecarManagerRef } = await import('../actions/tools/sidecar-route.ts');
+      setSidecarManagerRef(sidecarManager);
+      console.log('[Daemon] Sidecar routing enabled for run_command, read_file, write_file, list_directory');
+    }
+
+    // 10h. Wire sidecar events into event pipeline
+    sidecarManager.onEvent((sidecarId, event) => {
+      const eventType = `sidecar_${event.type}`;
+      const eventData = {
+        sidecar_id: sidecarId,
+        ...(typeof event.payload === 'object' && event.payload !== null ? event.payload as Record<string, unknown> : { payload: event.payload }),
+      };
+      const observerEvent = {
+        type: eventType,
+        data: eventData,
+        timestamp: event.timestamp ?? Date.now(),
+      };
+
+      // Classify and route
+      const classified = classifyEvent(observerEvent);
+      if (classified.priority === 'critical' || classified.priority === 'high') {
+        reactor.react(classified).catch(err =>
+          console.error('[Daemon] Sidecar event reaction error:', err)
+        );
+      } else {
+        coalescer.addEvent(classified);
+      }
+
+      // Broadcast to dashboard
+      wsService.broadcastSidecarEvent(sidecarId, observerEvent);
+    });
+
     // 11. Start health monitoring
     healthMonitor.start(config.healthCheckInterval);
 
