@@ -1,90 +1,110 @@
-# Project J.A.R.V.I.S.
+# JARVIS
 
-**J**ust **A** **R**eally **V**ersatile **I**ntelligent **S**ystem
+**Just A Really Versatile Intelligent System**
 
-An AI-powered personal assistant system built with Bun, TypeScript, and modern LLM providers.
+> "The AI that doesn't ask permission." — Dangerously powerful by design.
+
+JARVIS is an always-on autonomous AI daemon with a live world model. It is not a chatbot with tools. It is a proactive system that sees your desktop, thinks about what you're doing, and acts — within the authority limits you define.
+
+---
+
+## What Makes JARVIS Different
+
+| Feature | ChatGPT Agent | JARVIS |
+|---|---|---|
+| Always-on | No — request/response only | Yes — persistent daemon |
+| Desktop awareness | No | Yes — full capture every 5-10s |
+| Native app control | No | Yes — Windows + Linux |
+| Multi-agent delegation | No | Yes — 11 specialist roles |
+| Visual workflow builder | No | Yes — 50+ nodes, n8n-style |
+| Voice with wake word | No | Yes — streaming TTS + openwakeword |
+| Goal pursuit (OKRs) | No | Yes — drill sergeant accountability |
+| Authority gating | No | Yes — runtime enforcement + audit trail |
+
+---
+
+## Core Capabilities
+
+**Conversations** — Multi-provider LLM routing (Anthropic Claude, OpenAI GPT, Ollama). Streaming responses, personality engine, vault-injected memory context on every message.
+
+**Tool Execution** — 9 builtin tools with up to 25 iterations per turn. The agent loop runs until the task is complete, not until the response looks done.
+
+**Memory & Knowledge** — Vault knowledge graph (entities, facts, relationships) stored in SQLite. Extracted automatically after each response. Injected into the system prompt so JARVIS always remembers what matters.
+
+**Browser Control** — Auto-launches Chromium in stealth mode. CDP on port 9222. 5 browser tools. Handles navigation, interaction, extraction, and form filling.
+
+**Desktop Automation** — C# FlaUI sidecar (`desktop-bridge.exe`) for Windows native app control from WSL. 8 desktop tools including clipboard, window management, and UI element interaction.
+
+**Multi-Agent Hierarchy** — `delegate_task` and `manage_agents` tools. An AgentTaskManager coordinates 11 specialist roles. Sub-agents are denied governed actions — authority stays with the top-level agent.
+
+**Voice Interface** — edge-tts TTS with streaming sentence-by-sentence playback. Binary WebSocket protocol carries mic audio (WebM) and TTS audio (MP3) on the same connection. Wake word via openwakeword (ONNX, runs in-browser).
+
+**Continuous Awareness** — Full desktop capture at 5-10 second intervals. Hybrid OCR (Tesseract.js) + Cloud Vision. Struggle detection, activity session inference, entity-linked context graph. Proactive suggestions and an overlay widget.
+
+**Workflow Automation** — Visual builder powered by `@xyflow/react`. 50+ nodes across 5 categories. Triggers: cron, webhook, file watch, screen events, polling, clipboard, process, git, email, calendar. NL chat creation, YAML export/import, retry + fallback + AI-powered self-heal.
+
+**Goal Pursuit** — OKR hierarchy (objective → key result → daily action). Google-style 0.0–1.0 scoring. Morning planning, evening review, drill sergeant escalation. Awareness pipeline auto-advances progress. Three dashboard views: kanban, timeline, metrics.
+
+**Authority & Autonomy** — Runtime enforcement with soft-gate approvals. Multi-channel approval delivery (chat, Telegram, Discord). Full audit trail. Emergency pause/kill controls. Consecutive-approval learning suggests auto-approve rules.
+
+---
+
+## Dashboard (13 Pages)
+
+Built with React 19 and Tailwind CSS 4. Served by the daemon.
+
+| Page | Purpose |
+|---|---|
+| Chat | Primary conversation interface with streaming |
+| Tasks | Active commitments and background work queue |
+| Content Pipeline | Multi-step content generation and review |
+| Knowledge Graph | Visual vault explorer — entities, facts, relationships |
+| Memory | Raw vault search and inspection |
+| Calendar | Google Calendar integration with scheduling tools |
+| Agent Office | Multi-agent delegation status and role management |
+| Command Center | Tool history, execution logs, proactive notifications |
+| Authority | Approval queue, permission rules, audit trail |
+| Awareness | Live desktop feed, activity timeline, suggestions |
+| Workflows | Visual builder, execution monitor, version history |
+| Goals | OKR dashboard — kanban, timeline, and metrics views |
+| Settings | API keys, integrations, behavior configuration |
+
+---
 
 ## Quick Start
 
+### One-liner install
+
 ```bash
-# Install dependencies
+curl -fsSL https://raw.githubusercontent.com/vierisid/jarvis/main/install.sh | bash
+```
+
+This installs the `jarvis` CLI, sets up systemd/launchd autostart, and runs the interactive configuration wizard.
+
+### Manual setup
+
+```bash
+# Prerequisites: Bun >= 1.0
 bun install
-
-# Setup configuration
 bun run setup
-
-# Test LLM providers
-bun run test:llm
-
-# Run examples
-bun run examples
-
-# Start daemon (coming soon)
-bun run dev
 ```
 
-## Features
+The `setup` command runs an interactive wizard that creates `~/.jarvis/config.yaml`.
 
-### LLM Provider Abstraction
-- **Multi-Provider Support**: Anthropic Claude, OpenAI GPT, Ollama (local)
-- **Automatic Fallback**: Seamless provider switching on failure
-- **Streaming Support**: Real-time response streaming
-- **Tool Calling**: Cross-provider function calling
-- **Type-Safe**: Full TypeScript coverage
+### Run
 
-### Configuration System
-- **YAML-Based**: Human-readable configuration
-- **Type-Safe**: Strong typing with defaults
-- **Deep Merging**: Partial configs merge with defaults
-- **Path Expansion**: Automatic `~` expansion
-
-### Architecture (Planned)
-- **Daemon**: Background service with WebSocket API
-- **Vault**: SQLite-based memory and state persistence
-- **Roles**: Pluggable role-based behaviors
-- **Agents**: Autonomous task executors
-- **Observers**: System monitoring and awareness
-- **Actions**: Cross-platform automation
-
-## Documentation
-
-- **[Quick Start Guide](QUICKSTART.md)** - Get up and running in 5 minutes
-- **[LLM Providers](docs/LLM_PROVIDERS.md)** - Complete provider documentation
-- **[Config System](src/config/README.md)** - Configuration reference
-- **[Implementation Summary](IMPLEMENTATION_SUMMARY.md)** - Architecture overview
-
-## Project Structure
-
+```bash
+jarvis          # Start the daemon (production)
+bun run dev     # Start with hot reload (development)
 ```
-~/jarvis/
-├── src/
-│   ├── llm/              # LLM provider abstraction
-│   │   ├── provider.ts   # Core types & interfaces
-│   │   ├── anthropic.ts  # Claude provider
-│   │   ├── openai.ts     # GPT provider
-│   │   ├── ollama.ts     # Local models provider
-│   │   ├── manager.ts    # Multi-provider manager
-│   │   └── index.ts      # Public exports
-│   ├── config/           # Configuration system
-│   │   ├── types.ts      # Config types & defaults
-│   │   ├── loader.ts     # YAML loader/saver
-│   │   └── index.ts      # Public exports
-│   ├── daemon/           # Background service (WIP)
-│   ├── vault/            # SQLite persistence (WIP)
-│   ├── roles/            # Role definitions (WIP)
-│   ├── agents/           # Autonomous agents (WIP)
-│   ├── observers/        # System observers (WIP)
-│   └── actions/          # Action implementations (WIP)
-├── examples/             # Usage examples
-├── scripts/              # Utility scripts
-├── roles/                # Role configuration files
-└── docs/                 # Documentation
 
-```
+The dashboard is available at `http://localhost:7777` once the daemon is running.
+
+---
 
 ## Configuration
 
-Create `~/.jarvis/config.yaml`:
+JARVIS stores its configuration at `~/.jarvis/config.yaml`. The only required field is the Anthropic API key.
 
 ```yaml
 daemon:
@@ -97,7 +117,7 @@ llm:
   fallback: ["openai", "ollama"]
   anthropic:
     api_key: "sk-ant-..."
-    model: "claude-sonnet-4-5-20250929"
+    model: "claude-opus-4-6"
 
 personality:
   core_traits: ["loyal", "efficient", "proactive"]
@@ -108,128 +128,96 @@ authority:
 active_role: "default"
 ```
 
-See [config.example.yaml](config.example.yaml) for all options.
+See [config.example.yaml](config.example.yaml) for the full reference including Google OAuth, Telegram, Discord, and voice settings.
 
-## Usage Example
+---
 
-```typescript
-import { loadConfig } from './src/config/index.ts';
-import { LLMManager, AnthropicProvider } from './src/llm/index.ts';
-
-// Load configuration
-const config = await loadConfig();
-
-// Initialize LLM manager
-const manager = new LLMManager();
-manager.registerProvider(
-  new AnthropicProvider(
-    config.llm.anthropic.api_key,
-    config.llm.anthropic.model
-  )
-);
-
-// Chat
-const response = await manager.chat([
-  { role: 'user', content: 'Hello, J.A.R.V.I.S.!' }
-]);
-
-console.log(response.content);
-
-// Stream
-for await (const event of manager.stream(messages)) {
-  if (event.type === 'text') {
-    process.stdout.write(event.text);
-  }
-}
-```
-
-## Available Scripts
+## Development
 
 ```bash
-bun run start       # Start daemon
-bun run dev         # Start daemon with hot reload
-bun test            # Run test suite
-bun run setup       # Setup configuration
-bun run test:llm    # Test LLM providers
-bun run examples    # Run integration examples
-bun run db:init     # Initialize database
+bun test                # Run all tests (377 tests across 22 files)
+bun run dev             # Hot-reload daemon
+bun run db:init         # Initialize or reset the database
 ```
+
+### Stack
+
+- **Runtime**: Bun (not Node.js)
+- **Language**: TypeScript (ESM)
+- **Database**: SQLite via `bun:sqlite`
+- **UI**: React 19, Tailwind CSS 4, `@xyflow/react`
+- **LLM**: Anthropic Claude (primary), OpenAI GPT, Ollama
+- **Desktop sidecar**: C# + FlaUI (`desktop-bridge.exe`)
+- **Voice**: openwakeword (ONNX), edge-tts-universal
+
+---
+
+## Development Status
+
+### Completed Milestones
+
+| # | Milestone | Summary |
+|---|---|---|
+| 1 | LLM Conversations | Multi-provider streaming, personality engine |
+| 2 | Tool Execution Loop | 9 builtin tools, 25-iteration agent loop |
+| 3 | Memory Retrieval | Vault knowledge graph injected per message |
+| 4 | Browser Control | Chromium auto-launch, CDP, 5 browser tools |
+| 5 | Proactive Agent | CommitmentExecutor, Gmail/Calendar observers, research queue |
+| 6 | Dashboard UI | 13-page React 19 dashboard, Google integrations |
+| 7 | Multi-Agent Hierarchy | `delegate_task`, AgentTaskManager, 11 specialist roles |
+| 8 | Communication Channels | Telegram, Discord, pluggable STT, voice transcription |
+| 9 | Native App Control | FlaUI sidecar, DesktopController, 8 desktop tools |
+| 10 | Voice Interface | edge-tts, binary WS, wake word, streaming playback |
+| 11 | Authority & Autonomy | Runtime enforcement, soft-gate approvals, audit trail, emergency controls |
+| 12 | Distribution & Onboarding | `jarvis` CLI, install.sh, interactive wizard, systemd/launchd |
+| 13 | Continuous Awareness | Desktop capture, OCR+Vision, proactive suggestions, overlay widget |
+| 14 | Workflow Automation | Visual builder, 50+ nodes, NL creation, self-healing execution |
+| 15 | Plugin Ecosystem | TypeScript SDK, tiered permissions, official plugin registry |
+| 16 | Autonomous Goal Pursuit | OKR hierarchy, 0.0–1.0 scoring, daily rhythm, accountability |
+
+**377 tests passing across 22 test files. ~30,000+ lines of TypeScript.**
+
+### Upcoming
+
+| # | Milestone |
+|---|---|
+| 17 | Smart Home — Home Assistant integration |
+| 18 | Financial Intelligence — Plaid, portfolio tracking |
+| 19 | Mobile Companion — React Native dashboard |
+| 20 | Self-Improvement — Autonomous prompt evolution |
+| 21 | Multi-Modal — DALL-E 3, full video/image processing |
+| 22 | Swarm Intelligence — Multi-device coordination |
+
+See [VISION.md](VISION.md) for the full roadmap with detailed specifications.
+
+---
+
+## Documentation
+
+- [VISION.md](VISION.md) — Full roadmap and milestone specifications
+- [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) — LLM provider configuration
+- [docs/WORKFLOW_AUTOMATION.md](docs/WORKFLOW_AUTOMATION.md) — Workflow engine guide
+- [docs/VAULT_EXTRACTOR.md](docs/VAULT_EXTRACTOR.md) — Memory and knowledge vault
+- [docs/PERSONALITY_ENGINE.md](docs/PERSONALITY_ENGINE.md) — Personality and role system
+- [config.example.yaml](config.example.yaml) — Full configuration reference
+
+---
 
 ## Requirements
 
 - **Bun** >= 1.0
-- **TypeScript** >= 5.0
-- At least one of:
-  - Anthropic API key
-  - OpenAI API key
-  - Ollama (local installation)
+- **OS**: macOS, Linux, or Windows (WSL2)
+- **Anthropic API key** (required — powers the primary LLM)
+- OpenAI API key (optional — fallback LLM)
+- Ollama (optional — local model fallback)
+- Google OAuth credentials (optional — Calendar and Gmail integration)
+- Telegram bot token (optional — notification channel)
+- Discord bot token (optional — notification channel)
 
-## Installation
-
-1. **Install Bun**:
-   ```bash
-   curl -fsSL https://bun.sh/install | bash
-   ```
-
-2. **Clone and Setup**:
-   ```bash
-   cd ~/jarvis
-   bun install
-   bun run setup
-   ```
-
-3. **Configure**:
-   Edit `~/.jarvis/config.yaml` with your API keys
-
-4. **Test**:
-   ```bash
-   bun run test:llm
-   ```
-
-## Development Status
-
-### Completed ✅
-- LLM provider abstraction (Anthropic, OpenAI, Ollama)
-- Configuration system with YAML support
-- Multi-provider manager with fallback
-- Streaming support for all providers
-- Tool/function calling abstraction
-- Type-safe interfaces throughout
-- Test suites and examples
-
-### In Progress 🚧
-- Daemon WebSocket server
-- SQLite vault for memory/state
-- Role system implementation
-- Agent framework
-- Observer system
-- Action implementations
-
-### Planned 📋
-- Web UI
-- Voice interface
-- Mobile app
-- Plugin system
-- Cloud sync
-- Multi-user support
-
-## Contributing
-
-This is a personal project, but suggestions and feedback are welcome!
-
-## License
-
-Private project - All rights reserved
-
-## Credits
-
-Built with:
-- [Bun](https://bun.sh/) - JavaScript runtime
-- [TypeScript](https://www.typescriptlang.org/) - Type safety
-- [Anthropic](https://www.anthropic.com/) - Claude API
-- [OpenAI](https://openai.com/) - GPT API
-- [Ollama](https://ollama.ai/) - Local models
+For Windows desktop automation, `desktop-bridge.exe` is built automatically during setup. Requires .NET runtime on the Windows host.
 
 ---
 
-*"Just A Really Versatile Intelligent System"*
+## License
+
+Private project — All rights reserved.
