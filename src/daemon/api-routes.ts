@@ -584,6 +584,7 @@ export function createApiRoutes(ctx: ApiContext): Record<string, unknown> {
             fallback: config.llm.fallback,
             anthropic: config.llm.anthropic ? { model: config.llm.anthropic.model } : null,
             openai: config.llm.openai ? { model: config.llm.openai.model } : null,
+            groq: config.llm.groq ? { model: config.llm.groq.model } : null,
             ollama: config.llm.ollama ?? null,
           },
           personality: config.personality,
