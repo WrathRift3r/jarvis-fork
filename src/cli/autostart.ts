@@ -9,8 +9,39 @@
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { Buffer } from 'node:buffer';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { c, printOk, printErr, printWarn } from './helpers.ts';
+
+function canSpawnBinary(binary: string): boolean {
+  try {
+    return Boolean(Bun.which(binary));
+  } catch {
+    return false;
+  }
+}
+
+function spawnDetachedShell(command: string, requiredBinaries: string[]): boolean {
+  if (!requiredBinaries.every(canSpawnBinary)) {
+    return false;
+  }
+
+  try {
+    const child = spawn('bash', ['-lc', command], {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env },
+    });
+    if (child.pid == null) {
+      return false;
+    }
+    child.once('error', () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function getBunPath(): string {
   try {
@@ -124,6 +155,13 @@ async function startSystemdService(): Promise<boolean> {
     printErr(`Failed to start systemd service: ${err}`);
     return false;
   }
+}
+
+function scheduleSystemdRestart(): boolean {
+  return spawnDetachedShell(
+    'sleep 1; systemctl --user restart jarvis.service >/dev/null 2>&1',
+    ['bash', 'systemctl'],
+  );
 }
 
 async function uninstallSystemd(): Promise<boolean> {
@@ -274,6 +312,14 @@ async function startLaunchdService(): Promise<boolean> {
   }
 }
 
+function scheduleLaunchdRestart(): boolean {
+  const uid = process.getuid?.();
+  const command = uid != null
+    ? `sleep 1; launchctl kickstart -k gui/${uid}/ai.jarvis.daemon >/dev/null 2>&1`
+    : `sleep 1; launchctl kickstart -k gui/$(id -u)/ai.jarvis.daemon >/dev/null 2>&1`;
+  return spawnDetachedShell(command, ['bash', 'launchctl']);
+}
+
 async function uninstallLaunchd(): Promise<boolean> {
   try {
     if (existsSync(LAUNCHD_PLIST)) {
@@ -313,6 +359,20 @@ export async function startAutostartService(): Promise<boolean> {
     return startLaunchdService();
   }
   return startSystemdService();
+}
+
+/**
+ * Schedule a restart of the installed autostart service without blocking
+ * the current process. Useful when the API call is served by that service.
+ */
+export function scheduleAutostartRestart(): boolean {
+  if (process.platform === 'darwin') {
+    return scheduleLaunchdRestart();
+  }
+  if (process.platform === 'linux') {
+    return scheduleSystemdRestart();
+  }
+  return false;
 }
 
 /**
