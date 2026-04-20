@@ -1,31 +1,141 @@
-import { test, expect, describe, beforeEach, afterEach } from 'bun:test';
-import { DESKTOP_TOOLS } from './desktop.ts';
-import { setSidecarManagerRef, resolveDefaultSidecar } from './sidecar-route.ts';
-import type { SidecarInfo, SidecarCapability } from '../../sidecar/types.ts';
+import { afterEach, beforeEach, test, expect, describe } from 'bun:test';
+import type { AppController, UIElement, WindowInfo } from '../app-control/interface.ts';
+import { setNoLocalTools } from './local-tools-guard.ts';
+import {
+  DESKTOP_TOOLS,
+  __resetLocalDesktopStateForTests,
+  __setLocalDesktopControllerFactoryForTests,
+} from './desktop.ts';
 
-/**
- * Minimal mock of SidecarManager for routing tests.
- * Only implements listSidecars() — dispatchRPC is not needed for resolution logic.
- */
-function createMockManager(sidecars: SidecarInfo[]) {
+type FakeController = AppController & {
+  launches: Array<{ executable: string; args?: string }>;
+  clickedActions: string[];
+};
+
+function createFakeElement(): UIElement {
   return {
-    listSidecars: () => sidecars,
-    // Stub the rest of the Service interface so TS is happy
-    dispatchRPC: async () => { throw new Error('mock: dispatchRPC not wired'); },
-  } as any;
+    id: 'root',
+    role: 'window',
+    name: 'Calculator',
+    value: null,
+    bounds: { x: 10, y: 20, width: 300, height: 200 },
+    children: [],
+    properties: {
+      pid: 42,
+      className: 'calc',
+    },
+  };
 }
 
-function makeSidecar(overrides: Partial<SidecarInfo> & { id: string; name: string }): SidecarInfo {
+function createFakeWindow(): WindowInfo {
   return {
-    enrolled_at: '2024-01-01T00:00:00Z',
-    last_seen_at: null,
-    status: 'enrolled',
-    connected: false,
-    ...overrides,
+    pid: 42,
+    title: 'Calculator',
+    className: 'calc',
+    bounds: { x: 10, y: 20, width: 300, height: 200 },
+    focused: true,
+  };
+}
+
+function createFakeController(): FakeController {
+  const launches: Array<{ executable: string; args?: string }> = [];
+  const clickedActions: string[] = [];
+  return {
+    launches,
+    clickedActions,
+    async getActiveWindow() {
+      return createFakeWindow();
+    },
+    async getWindowTree() {
+      return [createFakeElement()];
+    },
+    async listWindows() {
+      return [createFakeWindow()];
+    },
+    async clickElement(element) {
+      clickedActions.push(String(element.properties.action ?? 'click'));
+    },
+    async typeText() {},
+    async pressKeys() {},
+    async captureScreen() {
+      return Buffer.from('png-data');
+    },
+    async captureWindow() {
+      return Buffer.from('png-data');
+    },
+    async focusWindow() {},
+    async launchApp(executable: string, args?: string) {
+      launches.push({ executable, args });
+      return { pid: 9001, executable, args: args ?? '' };
+    },
+  };
+}
+
+function createSnapshotController() {
+  const clickedIds: number[] = [];
+  let lastDepth: number | undefined;
+
+  return {
+    clickedIds,
+    lastDepth: () => lastDepth,
+    async getActiveWindow() {
+      return createFakeWindow();
+    },
+    async getWindowTree() {
+      return [createFakeElement()];
+    },
+    async listWindows() {
+      return [createFakeWindow()];
+    },
+    async clickElement() {},
+    async typeText() {},
+    async pressKeys() {},
+    async captureScreen() {
+      return Buffer.from('png-data');
+    },
+    async captureWindow() {
+      return Buffer.from('png-data');
+    },
+    async focusWindow() {},
+    async snapshot(_pid?: number, depth?: number) {
+      lastDepth = depth;
+      return {
+        window: { pid: 42, title: 'Calculator', className: 'calc' },
+        elements: [
+          {
+            id: 7,
+            role: 'button',
+            name: 'Equals',
+            value: null,
+            depth: 1,
+            properties: {
+              className: 'calc-button',
+              automationId: 'equals-button',
+            },
+          },
+        ],
+        totalElements: 1,
+      };
+    },
+    async clickById(elementId: number) {
+      clickedIds.push(elementId);
+      return `Clicked ${elementId}`;
+    },
   };
 }
 
 describe('DESKTOP_TOOLS', () => {
+  beforeEach(() => {
+    setNoLocalTools(false);
+    __resetLocalDesktopStateForTests();
+    __setLocalDesktopControllerFactoryForTests(() => createFakeController());
+  });
+
+  afterEach(() => {
+    setNoLocalTools(false);
+    __setLocalDesktopControllerFactoryForTests(null);
+  });
+
   test('contains 9 desktop tools', () => {
     expect(DESKTOP_TOOLS).toHaveLength(9);
   });
@@ -70,149 +180,105 @@ describe('DESKTOP_TOOLS', () => {
     }
   });
 
-  test('returns sidecar-not-initialized error without target when manager is null', async () => {
-    // Ensure no manager is set (default state)
-    setSidecarManagerRef(null as any);
-    for (const tool of DESKTOP_TOOLS) {
-      const result = await tool.execute({});
-      expect(String(result)).toContain('Sidecar system not initialized');
-    }
-  });
-});
-
-describe('resolveDefaultSidecar', () => {
-  afterEach(() => {
-    // Reset to null after each test
-    setSidecarManagerRef(null as any);
+  test('desktop_list_windows uses the local controller', async () => {
+    const tool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_list_windows');
+    const result = await tool!.execute({});
+    expect(String(result)).toContain('PID 42');
+    expect(String(result)).toContain('Calculator');
   });
 
-  test('returns error when sidecar manager is not initialized', () => {
-    setSidecarManagerRef(null as any);
-    const result = resolveDefaultSidecar('desktop');
-    expect('error' in result).toBe(true);
-    if ('error' in result) {
-      expect(result.error).toContain('not initialized');
-    }
+  test('desktop_snapshot caches local elements for follow-up actions', async () => {
+    const snapshotTool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_snapshot');
+    const clickTool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_click');
+
+    const snapshot = await snapshotTool!.execute({});
+    expect(String(snapshot)).toContain('[1] window');
+
+    const clickResult = await clickTool!.execute({ element_id: 1 });
+    expect(clickResult).toBe('Clicked element [1] with action "click".');
   });
 
-  test('returns error when no sidecars are enrolled', () => {
-    setSidecarManagerRef(createMockManager([]));
-    const result = resolveDefaultSidecar('desktop');
-    expect('error' in result).toBe(true);
-    if ('error' in result) {
-      expect(result.error).toContain('No sidecars enrolled');
-    }
+  test('desktop_click supports local action variants on tree-based controllers', async () => {
+    const controller = createFakeController();
+    __setLocalDesktopControllerFactoryForTests(() => controller);
+    const snapshotTool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_snapshot');
+    const clickTool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_click');
+
+    await snapshotTool!.execute({});
+    await clickTool!.execute({ element_id: 1, action: 'double_click' });
+    await clickTool!.execute({ element_id: 1, action: 'right_click' });
+    await clickTool!.execute({ element_id: 1, action: 'focus' });
+
+    expect(controller.clickedActions).toEqual(['double_click', 'right_click', 'focus']);
   });
 
-  test('returns error when sidecars enrolled but none connected', () => {
-    setSidecarManagerRef(createMockManager([
-      makeSidecar({ id: 's1', name: 'my-pc', connected: false, capabilities: ['desktop'] }),
-    ]));
-    const result = resolveDefaultSidecar('desktop');
-    expect('error' in result).toBe(true);
-    if ('error' in result) {
-      expect(result.error).toContain('No sidecars are currently connected');
-      expect(result.error).toContain('1 sidecar(s) enrolled but offline');
-    }
+  test('desktop_click returns unsupported actions for snapshot-based controllers', async () => {
+    const controller = createSnapshotController();
+    __setLocalDesktopControllerFactoryForTests(() => controller);
+    const snapshotTool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_snapshot');
+    const clickTool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_click');
+
+    await snapshotTool!.execute({});
+    const result = await clickTool!.execute({ element_id: 7, action: 'double_click' });
+
+    expect(result).toBe('Error: Local desktop action "double_click" is not supported by this platform controller.');
+    expect(controller.clickedIds).toEqual([]);
   });
 
-  test('returns error when connected but no matching capability', () => {
-    setSidecarManagerRef(createMockManager([
-      makeSidecar({ id: 's1', name: 'my-pc', connected: true, capabilities: ['terminal', 'filesystem'] }),
-    ]));
-    const result = resolveDefaultSidecar('desktop');
-    expect('error' in result).toBe(true);
-    if ('error' in result) {
-      expect(result.error).toContain('No connected sidecar has the "desktop" capability');
-      expect(result.error).toContain('terminal');
-    }
+  test('desktop_snapshot honors depth and omits unknown bounds for snapshot controllers', async () => {
+    const controller = createSnapshotController();
+    __setLocalDesktopControllerFactoryForTests(() => controller);
+    const snapshotTool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_snapshot');
+
+    const result = await snapshotTool!.execute({ depth: 3 });
+
+    expect(controller.lastDepth()).toBe(3);
+    expect(String(result)).toContain('[7] button "Equals" class="calc-button"');
+    expect(String(result)).not.toContain('bounds=');
   });
 
-  test('returns sidecar when exactly one connected with matching capability', () => {
-    const sidecar = makeSidecar({ id: 's1', name: 'my-pc', connected: true, capabilities: ['desktop', 'terminal'] });
-    setSidecarManagerRef(createMockManager([sidecar]));
-    const result = resolveDefaultSidecar('desktop');
-    expect('sidecar' in result).toBe(true);
-    if ('sidecar' in result) {
-      expect(result.sidecar.id).toBe('s1');
-      expect(result.sidecar.name).toBe('my-pc');
-    }
+  test('desktop_find_element matches snapshot controller properties', async () => {
+    const controller = createSnapshotController();
+    __setLocalDesktopControllerFactoryForTests(() => controller);
+    const findTool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_find_element');
+
+    const result = await findTool!.execute({
+      automation_id: 'equals-button',
+      class_name: 'calc-button',
+    });
+
+    expect(result).toBe('[7] button "Equals"');
   });
 
-  test('returns error when multiple connected sidecars have matching capability', () => {
-    setSidecarManagerRef(createMockManager([
-      makeSidecar({ id: 's1', name: 'home-pc', connected: true, capabilities: ['desktop'] }),
-      makeSidecar({ id: 's2', name: 'work-pc', connected: true, capabilities: ['desktop'] }),
-    ]));
-    const result = resolveDefaultSidecar('desktop');
-    expect('error' in result).toBe(true);
-    if ('error' in result) {
-      expect(result.error).toContain('Multiple sidecars');
-      expect(result.error).toContain('home-pc');
-      expect(result.error).toContain('work-pc');
-      expect(result.error).toContain('Specify a "target"');
-    }
+  test('desktop_launch_app uses local launch support', async () => {
+    const tool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_launch_app');
+    const result = await tool!.execute({ executable: 'xcalc', args: '--help' });
+    expect(String(result)).toContain('"executable": "xcalc"');
+    expect(String(result)).toContain('"args": "--help"');
   });
 
-  test('excludes sidecars with unavailable capability from auto-resolution', () => {
-    setSidecarManagerRef(createMockManager([
-      makeSidecar({
-        id: 's1', name: 'my-pc', connected: true,
-        capabilities: ['desktop'],
-        unavailable_capabilities: [{ name: 'desktop', reason: 'accessibility not enabled' }],
-      }),
-    ]));
-    const result = resolveDefaultSidecar('desktop');
-    expect('error' in result).toBe(true);
-    if ('error' in result) {
-      // Should not find the sidecar since its desktop capability is unavailable
-      expect(result.error).toContain('No connected sidecar has the "desktop" capability');
-    }
+  test('desktop_screenshot returns a tool result locally', async () => {
+    const tool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_screenshot');
+    const result = await tool!.execute({});
+    expect(result).toEqual({
+      content: [
+        { type: 'text', text: 'Desktop screenshot captured.' },
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: Buffer.from('png-data').toString('base64'),
+          },
+        },
+      ],
+    });
   });
 
-  test('resolves correct sidecar when one has capability unavailable and another does not', () => {
-    setSidecarManagerRef(createMockManager([
-      makeSidecar({
-        id: 's1', name: 'broken-pc', connected: true,
-        capabilities: ['desktop'],
-        unavailable_capabilities: [{ name: 'desktop', reason: 'no accessibility' }],
-      }),
-      makeSidecar({
-        id: 's2', name: 'working-pc', connected: true,
-        capabilities: ['desktop'],
-      }),
-    ]));
-    const result = resolveDefaultSidecar('desktop');
-    expect('sidecar' in result).toBe(true);
-    if ('sidecar' in result) {
-      expect(result.sidecar.id).toBe('s2');
-      expect(result.sidecar.name).toBe('working-pc');
-    }
-  });
-
-  test('resolves screenshot capability independently from desktop', () => {
-    setSidecarManagerRef(createMockManager([
-      makeSidecar({ id: 's1', name: 'my-pc', connected: true, capabilities: ['screenshot'] }),
-    ]));
-    const desktopResult = resolveDefaultSidecar('desktop');
-    expect('error' in desktopResult).toBe(true);
-
-    const screenshotResult = resolveDefaultSidecar('screenshot');
-    expect('sidecar' in screenshotResult).toBe(true);
-    if ('sidecar' in screenshotResult) {
-      expect(screenshotResult.sidecar.id).toBe('s1');
-    }
-  });
-
-  test('ignores offline sidecars even if they have the capability', () => {
-    setSidecarManagerRef(createMockManager([
-      makeSidecar({ id: 's1', name: 'offline-pc', connected: false, capabilities: ['desktop'] }),
-      makeSidecar({ id: 's2', name: 'online-pc', connected: true, capabilities: ['desktop'] }),
-    ]));
-    const result = resolveDefaultSidecar('desktop');
-    expect('sidecar' in result).toBe(true);
-    if ('sidecar' in result) {
-      expect(result.sidecar.id).toBe('s2');
-    }
+  test('respects --no-local-tools for desktop tools', async () => {
+    setNoLocalTools(true);
+    const tool = DESKTOP_TOOLS.find((entry) => entry.name === 'desktop_list_windows');
+    const result = await tool!.execute({});
+    expect(String(result)).toContain('Local tool execution is disabled');
   });
 });
