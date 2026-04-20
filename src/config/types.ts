@@ -161,6 +161,7 @@ export type JarvisConfig = {
     gemini?: { api_key: string; model?: string };
     ollama?: { base_url?: string; model?: string };
     openrouter?: { api_key: string; model?: string };
+    nvidia?: { api_key: string; model?: string };
   };
   personality: {
     core_traits: string[];
@@ -254,6 +255,10 @@ export const DEFAULT_CONFIG: JarvisConfig = {
     openrouter: {
       api_key: '',
       model: 'anthropic/claude-sonnet-4',
+    },
+    nvidia: {
+      api_key: '',
+      model: 'mistral-nemo-minitron-8b-base',
     },
   },
   personality: {
