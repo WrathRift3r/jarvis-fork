@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "../hooks/useApi";
 import type { AgentActivityEvent } from "../hooks/useWebSocket";
 import CommandCenterView from "../components/office/CommandCenterView";
@@ -47,16 +47,7 @@ export default function OfficePage({ agentActivity }: Props) {
   const [selectedSpecialist, setSelectedSpecialist] = useState("software-engineer");
   const [spawnTask, setSpawnTask] = useState("");
   const [spawnContext, setSpawnContext] = useState("");
-
-  function isAgentActive(agent: AgentWithLive): boolean {
-    if (agent.isPrimary) return true;
-    return Boolean(
-      agent.live?.busy
-      || agent.live?.status === "active"
-      || agent.live?.current_task
-      || agent.live?.latest_task?.status === "running"
-    );
-  }
+  const dialogRef = useRef<HTMLDivElement | null>(null);
 
   const fetchAgents = useCallback(async () => {
     try {
@@ -90,6 +81,25 @@ export default function OfficePage({ agentActivity }: Props) {
     return () => clearInterval(interval);
   }, [fetchAgents, fetchSpecialists]);
 
+  useEffect(() => {
+    if (!spawnMessage) return;
+    const timer = setTimeout(() => setSpawnMessage(null), 4000);
+    return () => clearTimeout(timer);
+  }, [spawnMessage]);
+
+  useEffect(() => {
+    if (spawnOpen) dialogRef.current?.focus();
+  }, [spawnOpen]);
+
+  useEffect(() => {
+    if (!spawnOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !spawning) setSpawnOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [spawnOpen, spawning]);
+
   function getLive(roleId: string): LiveAgentInfo | null {
     return (
       liveAgents.find(
@@ -114,7 +124,7 @@ export default function OfficePage({ agentActivity }: Props) {
     : allAgents;
 
   // Stats
-  const activeCount = allAgents.filter((agent) => isAgentActive(agent)).length;
+  const activeCount = allAgents.filter((a) => a.isPrimary || a.live?.busy).length;
   const totalCount = AGENT_ROSTER.length;
 
   const selectedSpecialistMeta = specialists.find((specialist) => specialist.id === selectedSpecialist) ?? null;
@@ -269,19 +279,9 @@ export default function OfficePage({ agentActivity }: Props) {
 
       {spawnMessage && (
         <div
-          style={{
-            position: "fixed",
-            right: "24px",
-            top: "24px",
-            zIndex: 40,
-            maxWidth: "360px",
-            padding: "10px 12px",
-            borderRadius: "10px",
-            border: `1px solid ${spawnMessage.type === "error" ? "rgba(248,113,113,0.28)" : "rgba(52,211,153,0.28)"}`,
-            background: spawnMessage.type === "error" ? "rgba(248,113,113,0.10)" : "rgba(52,211,153,0.10)",
-            color: spawnMessage.type === "error" ? "var(--rose)" : "var(--emerald)",
-            fontSize: "12px",
-          }}
+          role="status"
+          aria-live="polite"
+          className={`ag-spawn-toast${spawnMessage.type === "error" ? " error" : ""}`}
         >
           {spawnMessage.text}
         </div>
@@ -289,77 +289,46 @@ export default function OfficePage({ agentActivity }: Props) {
 
       {spawnOpen && (
         <div
+          className="ag-spawn-overlay"
           onClick={() => !spawning && setSpawnOpen(false)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(3,6,12,0.72)",
-            backdropFilter: "blur(8px)",
-            zIndex: 50,
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "center",
-            padding: "20px",
-            overflowY: "auto",
-          }}
         >
           <div
+            ref={dialogRef}
+            tabIndex={-1}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="spawn-dialog-title"
+            className="ag-spawn-dialog"
             onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(560px, 100%)",
-              marginTop: "40px",
-              marginBottom: "40px",
-              background: "rgba(9,13,22,0.98)",
-              border: "1px solid rgba(255,255,255,0.08)",
-              borderRadius: "18px",
-              padding: "20px",
-              boxShadow: "0 24px 80px rgba(0,0,0,0.4)",
-              flexShrink: 0,
-            }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "flex-start" }}>
+            <div className="ag-spawn-dialog-header">
               <div>
-                <div style={{ color: "var(--text-1)", fontSize: "16px", fontWeight: 600 }}>Spawn Agent</div>
-                <div style={{ color: "var(--text-3)", fontSize: "12px", marginTop: "6px", lineHeight: 1.6 }}>
+                <div id="spawn-dialog-title" className="ag-spawn-dialog-title">Spawn Agent</div>
+                <div className="ag-spawn-dialog-subtitle">
                   Create a persistent specialist and optionally assign a task immediately.
                 </div>
               </div>
               <button
+                type="button"
                 onClick={() => setSpawnOpen(false)}
                 disabled={spawning}
-                style={modalDismissButtonStyle}
+                aria-label="Close"
+                className="ag-spawn-dialog-close"
               >
                 ×
               </button>
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "14px", marginTop: "18px" }}>
-              <div style={fieldLabelStyle}>
+            <div className="ag-spawn-dialog-body">
+              <div className="ag-spawn-field-label">
                 Specialist
-                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                <div className="ag-spawn-specialist-list">
                   {specialists.map((specialist) => (
                     <button
                       key={specialist.id}
                       type="button"
                       onClick={() => setSelectedSpecialist(specialist.id)}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "10px",
-                        padding: "10px 12px",
-                        borderRadius: "10px",
-                        border: selectedSpecialist === specialist.id
-                          ? "1px solid rgba(34,211,238,0.4)"
-                          : "1px solid rgba(255,255,255,0.08)",
-                        background: selectedSpecialist === specialist.id
-                          ? "rgba(34,211,238,0.1)"
-                          : "rgba(255,255,255,0.03)",
-                        color: "var(--text-1)",
-                        cursor: "pointer",
-                        textAlign: "left",
-                        fontSize: "13px",
-                        fontWeight: selectedSpecialist === specialist.id ? 600 : 400,
-                      }}
+                      className={`ag-spawn-specialist-btn${selectedSpecialist === specialist.id ? " selected" : ""}`}
                     >
                       {specialist.name}
                     </button>
@@ -368,40 +337,52 @@ export default function OfficePage({ agentActivity }: Props) {
               </div>
 
               {selectedSpecialistMeta && (
-                <div style={{ color: "var(--text-3)", fontSize: "11px", lineHeight: 1.5, marginTop: "-6px" }}>
+                <div className="ag-spawn-specialist-meta">
                   {selectedSpecialistMeta.description}
                   {" · "}Auth {selectedSpecialistMeta.authority_level} · {selectedSpecialistMeta.tools.length} tools
                 </div>
               )}
 
-              <label style={fieldLabelStyle}>
+              <label className="ag-spawn-field-label">
                 Task
                 <textarea
                   value={spawnTask}
                   onChange={(e) => setSpawnTask(e.target.value)}
                   rows={2}
                   placeholder="Optional. Leave blank to spawn the agent in idle mode."
-                  style={{ ...fieldStyle, resize: "vertical", minHeight: "60px" }}
+                  className="ag-spawn-field-input"
+                  style={{ minHeight: "60px" }}
                 />
               </label>
 
-              <label style={fieldLabelStyle}>
+              <label className="ag-spawn-field-label">
                 Context
                 <textarea
                   value={spawnContext}
                   onChange={(e) => setSpawnContext(e.target.value)}
                   rows={2}
                   placeholder="Optional background context for the task."
-                  style={{ ...fieldStyle, resize: "vertical", minHeight: "48px" }}
+                  className="ag-spawn-field-input"
+                  style={{ minHeight: "48px" }}
                 />
               </label>
             </div>
 
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "18px" }}>
-              <button onClick={() => setSpawnOpen(false)} disabled={spawning} style={modalSecondaryButtonStyle}>
+            <div className="ag-spawn-dialog-footer">
+              <button
+                type="button"
+                onClick={() => setSpawnOpen(false)}
+                disabled={spawning}
+                className="ag-spawn-btn-secondary"
+              >
                 Cancel
               </button>
-              <button onClick={handleSpawn} disabled={spawning || !selectedSpecialistMeta} style={modalPrimaryButtonStyle}>
+              <button
+                type="button"
+                onClick={handleSpawn}
+                disabled={spawning || !selectedSpecialistMeta}
+                className="ag-spawn-btn-primary"
+              >
                 {spawning ? "Spawning..." : spawnTask.trim() ? "Spawn And Assign" : "Spawn Agent"}
               </button>
             </div>
@@ -411,66 +392,3 @@ export default function OfficePage({ agentActivity }: Props) {
     </div>
   );
 }
-
-const fieldLabelStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: "8px",
-  color: "var(--text-2)",
-  fontSize: "12px",
-  fontWeight: 600,
-};
-
-const fieldStyle: React.CSSProperties = {
-  width: "100%",
-  background: "rgba(255,255,255,0.03)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: "10px",
-  color: "var(--text-1)",
-  colorScheme: "dark",
-  fontSize: "13px",
-  padding: "12px 14px",
-  outline: "none",
-};
-
-const metaCardStyle: React.CSSProperties = {
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: "12px",
-  background: "rgba(255,255,255,0.025)",
-  padding: "12px 14px",
-};
-
-const modalPrimaryButtonStyle: React.CSSProperties = {
-  border: "1px solid rgba(34,211,238,0.24)",
-  background: "rgba(34,211,238,0.14)",
-  color: "var(--cyan)",
-  borderRadius: "10px",
-  padding: "10px 14px",
-  fontSize: "12px",
-  fontWeight: 600,
-  cursor: "pointer",
-};
-
-const modalSecondaryButtonStyle: React.CSSProperties = {
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "transparent",
-  color: "var(--text-2)",
-  borderRadius: "10px",
-  padding: "10px 14px",
-  fontSize: "12px",
-  fontWeight: 500,
-  cursor: "pointer",
-};
-
-const modalDismissButtonStyle: React.CSSProperties = {
-  width: "32px",
-  height: "32px",
-  borderRadius: "999px",
-  border: "1px solid rgba(255,255,255,0.12)",
-  background: "rgba(255,255,255,0.06)",
-  color: "var(--text-1)",
-  fontSize: "18px",
-  lineHeight: 1,
-  cursor: "pointer",
-  flexShrink: 0,
-};

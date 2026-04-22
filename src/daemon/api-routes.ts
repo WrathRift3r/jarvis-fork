@@ -43,6 +43,7 @@ import {
 } from '../vault/content-pipeline.ts';
 import {
   assignPersistentAgentTask,
+  HttpError,
   listPersistentAgents,
   spawnPersistentAgent,
   terminatePersistentAgent,
@@ -159,6 +160,11 @@ function error(message: string, status = 400): Response {
   return json({ error: message }, status);
 }
 
+function errorFromException(err: unknown): Response {
+  if (err instanceof HttpError) return error(err.message, err.status);
+  return error(err instanceof Error ? err.message : String(err), 500);
+}
+
 function getSearchParams(req: Request): URLSearchParams {
   return new URL(req.url).searchParams;
 }
@@ -195,10 +201,9 @@ function buildAgentSnapshots(ctx: ApiContext) {
   const agents = orchestrator.getAllAgents().map((agent) => {
     const base = agent.toJSON();
     const latestTask = latestTaskByAgent.get(agent.id);
-    const busy = busyAgents.has(agent.id) || base.status === 'active' || Boolean(base.current_task);
     return {
       ...base,
-      busy,
+      busy: busyAgents.has(agent.id),
       latest_task: latestTask ? {
         id: latestTask.id,
         status: latestTask.status,
@@ -626,12 +631,9 @@ export function createApiRoutes(ctx: ApiContext): Record<string, unknown> {
           }
 
           const latestTask = taskManager.getAgentTask(spawned.agent.id);
-          const busy = taskManager.isAgentBusy(spawned.agent.id)
-            || spawned.agent.status === 'active'
-            || Boolean(spawned.agent.agent.current_task);
           return json({
             ...spawned.agent.toJSON(),
-            busy,
+            busy: taskManager.isAgentBusy(spawned.agent.id),
             latest_task: latestTask ? {
               id: latestTask.id,
               status: latestTask.status,
@@ -643,7 +645,7 @@ export function createApiRoutes(ctx: ApiContext): Record<string, unknown> {
             assignment,
           }, 201);
         } catch (err) {
-          return error(err instanceof Error ? err.message : String(err));
+          return errorFromException(err);
         }
       },
     },
@@ -661,6 +663,7 @@ export function createApiRoutes(ctx: ApiContext): Record<string, unknown> {
       },
     },
 
+    // Bun.serve matches literal paths (e.g. /api/agents/specialists) before patterns, so order is irrelevant.
     '/api/agents/:id': {
       DELETE: (req: Request & { params: { id: string } }) => {
         try {
@@ -674,7 +677,7 @@ export function createApiRoutes(ctx: ApiContext): Record<string, unknown> {
           };
           return json(terminatePersistentAgent(deps, req.params.id));
         } catch (err) {
-          return error(err instanceof Error ? err.message : String(err));
+          return errorFromException(err);
         }
       },
     },
